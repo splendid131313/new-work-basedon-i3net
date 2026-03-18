@@ -1,0 +1,266 @@
+import config
+
+args, unparsed = config.get_args()
+
+import os
+import random
+import datetime
+import numpy as np
+from tqdm import tqdm
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.nn.functional as F
+
+import wandb
+
+from torch.utils.data.distributed import DistributedSampler
+
+from data import trainSet
+
+# from data_prostate import trainSet
+from util_evaluation import calc_psnr, calc_ssim
+from select_model import select_model
+import optim
+from select_loss import Select_Loss
+
+
+def main():
+    dist.init_process_group(backend="nccl")
+
+    local_rank = args.local_rank
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    is_main = rank == 0
+
+    GLOBAL_SEED = 777
+    random.seed(GLOBAL_SEED + rank)
+    np.random.seed(GLOBAL_SEED + rank)
+    torch.manual_seed(GLOBAL_SEED + rank)
+    torch.cuda.manual_seed(GLOBAL_SEED + rank)
+    torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
+
+    args.ckpt_dir = "experiments/" + args.model + "/" + args.ckpt_dir
+    if is_main:
+        os.makedirs(args.ckpt_dir, exist_ok=True)
+
+    trainset = trainSet(data_root=args.traindata_path, args=args)
+    train_sampler = DistributedSampler(
+        trainset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+    )
+
+    dataloader = torch.utils.data.DataLoader(
+        trainset,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        pin_memory=False,
+        drop_last=False,
+    )
+
+    model = select_model(args)
+
+    if args.resume:
+        if is_main:
+            print("load weight")
+        load_ckpt = torch.load(args.ckpt, map_location="cpu")
+        state = load_ckpt["state_dict"]
+        if any(k.startswith("module.") for k in state.keys()):
+            state = {k.replace("module.", ""): v for k, v in state.items()}
+        model.load_state_dict(state)
+        if is_main:
+            print("load weight success")
+        args.start_epoch = load_ckpt["epoch"]
+
+    model = model.to(device)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+
+    optimizer = optim.select_optim(args, model)
+    scheduler = optim.select_scheduler(args, optimizer)
+    loss_function = Select_Loss(args).to(device)
+
+    if is_main:
+        wandb.init(
+            project="i3net",
+            name="train_i3",
+            config=args.__dict__,
+        )
+
+    # amp
+    use_amp = args.amp
+    if use_amp:
+        scaler = torch.cuda.amp.GradScaler()
+        autocast = torch.cuda.amp.autocast
+    else:
+        scaler = None
+        autocast = None
+
+    model.train()
+    for epoch in range(args.start_epoch, args.max_epoch):
+        train_sampler.set_epoch(epoch)
+
+        loss_iter_epoch = 0
+        loss_traj_epoch = 0
+        loss_epoch = 0
+        psnr_epoch = 0
+        psnr_pred_epoch = 0
+        psnr_traj_epoch = 0
+
+        if is_main:
+            loader_iter = tqdm(enumerate(dataloader), total=len(dataloader))
+        else:
+            loader_iter = enumerate(dataloader)
+
+        for iter, hr in loader_iter:
+            # hr: [B, N, H, W, S] 或 [B, H, W, S]
+            if len(hr.shape) == 5:
+                gt = torch.cat([i for i in hr], 0)  # [B, H, W, S]
+            else:
+                gt = hr
+            lr = gt[..., :: args.upscale]  # [B, H, W, lr_slice_patch]
+
+            gt = gt.to(device, non_blocking=True)
+            lr = lr.to(device, non_blocking=True)
+            i_start = gt[...,0].unsqueeze(1)
+            i_end = gt[...,-1].unsqueeze(1)
+            time_list = args.time_list[1:-1].to(device)
+
+            optimizer.zero_grad()
+
+            if use_amp:
+                with autocast():
+                    sr, I_t = model(lr, i_start, i_end, time_list)
+                    loss_iter = loss_function(sr, gt)
+                    loss_traj = F.l1_loss(I_t, gt[...,1:-1])
+                    loss = loss_iter + loss_traj
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                sr, I_t = model(lr, i_start, i_end, time_list)
+                loss_iter = loss_function(sr, gt)
+                loss_traj = F.l1_loss(I_t, gt[...,1:-1])
+                loss = loss_iter + loss_traj
+                loss.backward()
+                optimizer.step()
+
+            with torch.no_grad():
+                psnr_iter = 0.0
+                psnr_pred_iter = 0.0
+                psnr_traj_iter = 0.0
+                for bz in range(gt.shape[0]):
+                    psnr_iter += calc_psnr(gt[bz, :, :, :], sr[bz, :, :, :]).item()
+                    psnr_pred_iter += calc_psnr(gt[bz, :, :, 1::args.upscale], sr[bz, :, :, 1::args.upscale]).item()
+                    psnr_traj_iter += calc_psnr(gt[bz, :, :, 1:-1], I_t[bz, :, :, :]).item()
+                psnr_iter /= gt.shape[0]
+                psnr_pred_iter /= gt.shape[0]
+                psnr_traj_iter /= gt.shape[0]
+
+            loss_iter_epoch += loss_iter.detach().item()
+            loss_traj_epoch += loss_traj.detach().item()
+            loss_epoch += loss.detach().item()
+            psnr_epoch += psnr_iter
+            psnr_pred_epoch += psnr_pred_iter
+            psnr_traj_epoch += psnr_traj_iter
+
+            if is_main:
+                lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
+                log = (
+                    f"epoch[{epoch + 1}/{args.max_epoch}] "
+                    f"iter[{iter + 1}/{len(dataloader)}] "
+                    f"psnrTr:{psnr_iter:.6f} psnrPred:{psnr_pred_iter:.6f} psnrTraj:{psnr_traj_iter:.6f} lossTr:{loss_iter_epoch:.12f} lossTraj:{loss_traj_epoch:.12f} lossTotal:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+                )
+                now = str(datetime.datetime.now())
+                print(now + " " + log)
+
+        loss_tensor = torch.tensor(loss_epoch, device=device)
+        loss_iter_tensor = torch.tensor(loss_iter_epoch, device=device)
+        loss_traj_tensor = torch.tensor(loss_traj_epoch, device=device)
+        psnr_tensor = torch.tensor(psnr_epoch, device=device)
+        psnr_pred_tensor = torch.tensor(psnr_pred_epoch, device=device)
+        psnr_traj_tensor = torch.tensor(psnr_traj_epoch, device=device)
+        count_tensor = torch.tensor(len(dataloader), device=device, dtype=torch.float32)
+
+        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(loss_iter_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(loss_traj_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(psnr_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(psnr_pred_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(psnr_traj_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+
+        loss_epoch = (loss_tensor / count_tensor).item()
+        loss_iter_epoch = (loss_iter_tensor / count_tensor).item()
+        loss_traj_epoch = (loss_traj_tensor / count_tensor).item()
+        psnr_epoch = (psnr_tensor / count_tensor).item()
+        psnr_pred_epoch = (psnr_pred_tensor / count_tensor).item()
+        psnr_traj_epoch = (psnr_traj_tensor / count_tensor).item()
+
+        if args.schedule == "step":
+            scheduler.step()
+        elif args.schedule == "cos_lr":
+            scheduler.step_update(epoch)
+        elif args.schedule == "Tmin":
+            scheduler.step(loss_epoch)
+        elif args.schedule == "Tmax":
+            scheduler.step(psnr_epoch)
+
+        if is_main:
+            lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
+
+            with torch.no_grad():
+                b, h, w, s = gt.shape
+                mid_s = s // 2
+                lr_mid = lr[0, :, :, lr.shape[3] // 2].detach().cpu().float().numpy()
+                sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
+                gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
+                I_t_mid = I_t[0, :, :, mid_s].detach().cpu().float().numpy()
+
+                wandb.log(
+                    {
+                        "train/psnr_epoch": psnr_epoch,
+                        "train/psnr_pred_epoch": psnr_pred_epoch,
+                        "train/psnr_traj_epoch": psnr_traj_epoch,
+                        "train/loss_epoch": loss_iter_epoch,
+                        "train/loss_traj_epoch": loss_traj_epoch,
+                        "train/loss_total_epoch": loss_epoch,
+                        "train/lr": lr_tmp,
+                        "epoch": epoch,
+                        "vis/lr_slice": wandb.Image(lr_mid, caption="LR input"),
+                        "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
+                        "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
+                        "vis/I_t_slice": wandb.Image(I_t_mid, caption="I_t"),
+                    }
+                )
+
+            log = (
+                f"epoch[{epoch + 1}/{args.max_epoch}] "
+                f"psnrTr:{psnr_epoch:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+            )
+            now = str(datetime.datetime.now())
+            print(now + " " + log)
+
+            if epoch + 1 > int(0.99 * args.max_epoch):
+                os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
+                state_dict = model.module.state_dict()  # DDP
+                torch.save(
+                    {"epoch": epoch + 1, "state_dict": state_dict},
+                    args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
+                )
+
+    if is_main:
+        wandb.finish()
+
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
