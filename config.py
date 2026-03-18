@@ -71,6 +71,5 @@ def get_args():
         print("Unparsed args: {}".format(unparsed))
     
     args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
-    args.time_list = torch.linspace(0, 1, args.hr_slice_patch)
     return args, unparsed
 

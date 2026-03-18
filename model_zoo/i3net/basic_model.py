@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 
 from .dct_util import DCT2x,IDCT2x
-from .trajectory_modeling import SliceSynthesis
 # from .utils_win import window_partitionx,window_reversex
 
 
@@ -236,20 +235,6 @@ class CrossViewBlock(nn.Module):
         x_out = x_cor_f + x_sag_f
         return x_out
 
-class TrajectoryBlock(nn.Module):
-    def __init__(self, n_feat):
-        super().__init__()
-        self.traj_branch = SliceSynthesis(n_feat=n_feat)
-        # self.relation_refine = RelationRefine(n_feat=n_feat)
-
-    def forward(self, i_start, i_end, time_list):
-        I_t = []
-        for t in time_list:
-            I_t.append(self.traj_branch(i_start, i_end, t))
-        I_t = torch.cat(I_t, 1)
-
-        return I_t
-
 class I3Net(nn.Module):
     def __init__(self,args=None,conv=default_conv):
         super(I3Net, self).__init__()
@@ -287,17 +272,11 @@ class I3Net(nn.Module):
             nn.ReLU(),
             conv(n_feats,out_slice,kernel_size)]
         self.tail = nn.Sequential(*modules_tail)
-
-        self.traj_branch = TrajectoryBlock(n_feat=n_feats)
         
-    def forward(self, x, i_start, i_end, time_list):
+    def forward(self, x):
         x = x.permute(0,3,1,2)
         x = x.contiguous()
-        x_head = self.head(x) 
-
-        i_start = self.head_traj(i_start)
-        i_end = self.head_traj(i_end)
-
+        x_head = self.head(x)
         res = x_head
 
         align_list = []
@@ -318,12 +297,8 @@ class I3Net(nn.Module):
         
         out[:,::self.args.upscale] = x
         out = out.permute(0,2,3,1).contiguous()
-
-        I_t = self.traj_branch(i_start, i_end, time_list)
-        I_t = I_t.permute(0,2,3,1).contiguous()
-        # I_t = torch.clamp(I_t, 0, 1)
        
-        return out, I_t
+        return out
 
 
 if __name__ == '__main__':
