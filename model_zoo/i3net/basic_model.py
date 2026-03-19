@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 
 from .dct_util import DCT2x,IDCT2x
-from .trajectory_modeling import SliceSynthesis
+from .flow_module import FlowModule
 # from .utils_win import window_partitionx,window_reversex
 
 
@@ -148,12 +148,10 @@ class IntraSliceBranch(nn.Module):
 
         return x_attn
 
-class I2Block(nn.Module):
-    def __init__(
-        self, conv, n_feat, kernel_size,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
-        super(I2Block, self).__init__()
-        inter_slice_branch = [
+class FlowEnchancedInterSliceBranch(nn.Module):
+    def __init__(self, n_feat):
+        super().__init__()
+        intra_slice_branch = [
             nn.PixelUnshuffle(2),
             nn.Conv2d(4*n_feat,4*n_feat,3,1,1),
             nn.ReLU(),
@@ -161,14 +159,40 @@ class I2Block(nn.Module):
             nn.PixelShuffle(2), # +
             nn.Conv2d(n_feat,n_feat,1,1,0)
         ]
-        self.inter_slice_branch = nn.Sequential(*inter_slice_branch)
+        self.intra_slice_branch = nn.Sequential(*intra_slice_branch)
+        self.flow_module = FlowModule(n_feat=n_feat)
+        self.fusion = nn.Sequential(
+            nn.Conv2d(n_feat*2, n_feat, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(n_feat, n_feat, 3, 1, 1),
+        )
+
+
+    def forward(self, x, i_start, i_end, t=0.5):
+        x = self.intra_slice_branch(x)
+
+        I_t, flow = self.flow_module(i_start, i_end, t)
+
+        fusion = self.fusion(torch.cat([x, I_t], dim=1))
+
+        return x + fusion
+
+class I2Block(nn.Module):
+    def __init__(
+        self, conv, n_feat, kernel_size,
+        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
+        super(I2Block, self).__init__()
+        self.flow_enchanced_inter_slice_branch = FlowEnchancedInterSliceBranch(n_feat=n_feat)
+
         self.res_scale = res_scale
 
         self.intra_slice_branch = IntraSliceBranch(conv=nn.Conv2d,n_feat=n_feat,kernel_size=kernel_size,bias=bias
                                   ,head_num=head_num,win_num_sqrt=win_num_sqrt,window_size=window_size)
 
-    def forward(self, x):
-        x_inter = self.inter_slice_branch(x).mul(self.res_scale)
+    def forward(self, x, i_start, i_end):
+        x_inter = self.flow_enchanced_inter_slice_branch(x, i_start, i_end).mul(
+            self.res_scale
+        )
         x_intra = self.intra_slice_branch(x)
         out = x_inter + x_intra + x
         return out
@@ -182,10 +206,12 @@ class I2Group(nn.Module):
         body = [I2Block(conv, n_feat, kernel_size,
                             bias, bn, act, res_scale,head_num,win_num_sqrt) for _ in range(n_depth)]
 
-        self.body = nn.Sequential(*body)
-    def forward(self,x):
-        x_f = self.body(x)
-        out = x_f
+        self.body = nn.ModuleList(body)
+    def forward(self,x,i_start,i_end):
+        res = x
+        for block in self.body:
+            res = block(res,i_start,i_end)
+        out = res
         return out
 
 
@@ -236,20 +262,6 @@ class CrossViewBlock(nn.Module):
         x_out = x_cor_f + x_sag_f
         return x_out
 
-class TrajectoryBlock(nn.Module):
-    def __init__(self, n_feat):
-        super().__init__()
-        self.traj_branch = SliceSynthesis(n_feat=n_feat)
-        # self.relation_refine = RelationRefine(n_feat=n_feat)
-
-    def forward(self, i_start, i_end, time_list):
-        I_t = []
-        for t in time_list:
-            I_t.append(self.traj_branch(i_start, i_end, t))
-        I_t = torch.cat(I_t, 1)
-
-        return I_t
-
 class I3Net(nn.Module):
     def __init__(self,args=None,conv=default_conv):
         super(I3Net, self).__init__()
@@ -268,9 +280,11 @@ class I3Net(nn.Module):
         self.head = nn.Sequential(conv(in_slice,n_feats,kernel_size),
                                   nn.ReLU(),
                                   conv(n_feats,n_feats,kernel_size))
-        self.head_traj = nn.Sequential(conv(1,n_feats,kernel_size),
-                                  nn.ReLU(),
-                                  conv(n_feats,n_feats,kernel_size))
+        self.head_traj = nn.Sequential(
+            conv(in_slice-1, n_feats, kernel_size),
+            nn.ReLU(),
+            conv(n_feats, n_feats, kernel_size),
+        )
         
         modules_body = [
             I2Group(
@@ -287,14 +301,14 @@ class I3Net(nn.Module):
             nn.ReLU(),
             conv(n_feats,out_slice,kernel_size)]
         self.tail = nn.Sequential(*modules_tail)
-
-        self.traj_branch = TrajectoryBlock(n_feat=n_feats)
         
-    def forward(self, x, i_start, i_end, time_list):
+    def forward(self, x):
         x = x.permute(0,3,1,2)
-        x = x.contiguous()
-        x_head = self.head(x) 
+        i_start = x[:, :-1, :, :]
+        i_end = x[:, 1:, :, :]
 
+        x = x.contiguous()
+        x_head = self.head(x)
         i_start = self.head_traj(i_start)
         i_end = self.head_traj(i_end)
 
@@ -305,7 +319,7 @@ class I3Net(nn.Module):
         align_list.append(res)
 
         for id,layer in enumerate(self.body):
-            res = layer(res)
+            res = layer(res, i_start, i_end)
             if id in [3,7]:
                 res = self.alignment[id//4+1](res) + res
                 align_list.append(res)
@@ -318,12 +332,8 @@ class I3Net(nn.Module):
         
         out[:,::self.args.upscale] = x
         out = out.permute(0,2,3,1).contiguous()
-
-        I_t = self.traj_branch(i_start, i_end, time_list)
-        I_t = I_t.permute(0,2,3,1).contiguous()
-        # I_t = torch.clamp(I_t, 0, 1)
-       
-        return out, I_t
+    
+        return out
 
 
 if __name__ == '__main__':

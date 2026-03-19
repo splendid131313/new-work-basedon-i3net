@@ -87,12 +87,12 @@ def main():
     scheduler = optim.select_scheduler(args, optimizer)
     loss_function = Select_Loss(args).to(device)
 
-    if is_main:
-        wandb.init(
-            project="i3net",
-            name="train_i3",
-            config=args.__dict__,
-        )
+    # if is_main:
+    #     wandb.init(
+    #         project="i3net",
+    #         name="flow_module",
+    #         config=args.__dict__,
+    #     )
 
     # amp
     use_amp = args.amp
@@ -108,11 +108,8 @@ def main():
         train_sampler.set_epoch(epoch)
 
         loss_iter_epoch = 0
-        loss_traj_epoch = 0
-        loss_epoch = 0
         psnr_epoch = 0
         psnr_pred_epoch = 0
-        psnr_traj_epoch = 0
 
         if is_main:
             loader_iter = tqdm(enumerate(dataloader), total=len(dataloader))
@@ -129,80 +126,64 @@ def main():
 
             gt = gt.to(device, non_blocking=True)
             lr = lr.to(device, non_blocking=True)
-            i_start = gt[...,0].unsqueeze(1)
-            i_end = gt[...,-1].unsqueeze(1)
-            time_list = args.time_list[1:-1].to(device)
+            # i_start = gt[...,0].unsqueeze(1)
+            # i_end = gt[...,-1].unsqueeze(1)
+            # time_list = args.time_list[1:-1].to(device)
 
             optimizer.zero_grad()
 
             if use_amp:
                 with autocast():
-                    sr, I_t = model(lr, i_start, i_end, time_list)
+                    sr = model(lr)
                     loss_iter = loss_function(sr, gt)
-                    loss_traj = F.l1_loss(I_t, gt[...,1:-1])
-                    loss = loss_iter + loss_traj
+                    loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                sr, I_t = model(lr, i_start, i_end, time_list)
+                sr = model(lr)
                 loss_iter = loss_function(sr, gt)
-                loss_traj = F.l1_loss(I_t, gt[...,1:-1])
-                loss = loss_iter + loss_traj
+                loss = loss_iter
                 loss.backward()
                 optimizer.step()
 
             with torch.no_grad():
                 psnr_iter = 0.0
                 psnr_pred_iter = 0.0
-                psnr_traj_iter = 0.0
                 for bz in range(gt.shape[0]):
                     psnr_iter += calc_psnr(gt[bz, :, :, :], sr[bz, :, :, :]).item()
                     psnr_pred_iter += calc_psnr(gt[bz, :, :, 1::args.upscale], sr[bz, :, :, 1::args.upscale]).item()
-                    psnr_traj_iter += calc_psnr(gt[bz, :, :, 1:-1], I_t[bz, :, :, :]).item()
                 psnr_iter /= gt.shape[0]
                 psnr_pred_iter /= gt.shape[0]
-                psnr_traj_iter /= gt.shape[0]
 
             loss_iter_epoch += loss_iter.detach().item()
-            loss_traj_epoch += loss_traj.detach().item()
-            loss_epoch += loss.detach().item()
             psnr_epoch += psnr_iter
             psnr_pred_epoch += psnr_pred_iter
-            psnr_traj_epoch += psnr_traj_iter
 
             if is_main:
                 lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
                 log = (
                     f"epoch[{epoch + 1}/{args.max_epoch}] "
                     f"iter[{iter + 1}/{len(dataloader)}] "
-                    f"psnrTr:{psnr_iter:.6f} psnrPred:{psnr_pred_iter:.6f} psnrTraj:{psnr_traj_iter:.6f} lossTr:{loss_iter_epoch:.12f} lossTraj:{loss_traj_epoch:.12f} lossTotal:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+                    f"psnrTr:{psnr_iter:.6f} psnrPred:{psnr_pred_iter:.6f} lossTr:{loss_iter_epoch:.12f} lr:{lr_tmp:.12f}"
                 )
                 now = str(datetime.datetime.now())
                 print(now + " " + log)
 
-        loss_tensor = torch.tensor(loss_epoch, device=device)
         loss_iter_tensor = torch.tensor(loss_iter_epoch, device=device)
-        loss_traj_tensor = torch.tensor(loss_traj_epoch, device=device)
         psnr_tensor = torch.tensor(psnr_epoch, device=device)
         psnr_pred_tensor = torch.tensor(psnr_pred_epoch, device=device)
-        psnr_traj_tensor = torch.tensor(psnr_traj_epoch, device=device)
         count_tensor = torch.tensor(len(dataloader), device=device, dtype=torch.float32)
 
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(loss_iter_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(loss_traj_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(psnr_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(psnr_pred_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_traj_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
 
-        loss_epoch = (loss_tensor / count_tensor).item()
         loss_iter_epoch = (loss_iter_tensor / count_tensor).item()
-        loss_traj_epoch = (loss_traj_tensor / count_tensor).item()
+        loss_epoch = loss_iter_epoch
         psnr_epoch = (psnr_tensor / count_tensor).item()
         psnr_pred_epoch = (psnr_pred_tensor / count_tensor).item()
-        psnr_traj_epoch = (psnr_traj_tensor / count_tensor).item()
 
         if args.schedule == "step":
             scheduler.step()
@@ -219,27 +200,25 @@ def main():
             with torch.no_grad():
                 b, h, w, s = gt.shape
                 mid_s = s // 2
+                lr = torch.clamp(lr, 0, 1)
+                sr = torch.clamp(sr, 0, 1)
+                gt = torch.clamp(gt, 0, 1)
                 lr_mid = lr[0, :, :, lr.shape[3] // 2].detach().cpu().float().numpy()
                 sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
                 gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
-                I_t_mid = I_t[0, :, :, mid_s].detach().cpu().float().numpy()
 
-                wandb.log(
-                    {
-                        "train/psnr_epoch": psnr_epoch,
-                        "train/psnr_pred_epoch": psnr_pred_epoch,
-                        "train/psnr_traj_epoch": psnr_traj_epoch,
-                        "train/loss_epoch": loss_iter_epoch,
-                        "train/loss_traj_epoch": loss_traj_epoch,
-                        "train/loss_total_epoch": loss_epoch,
-                        "train/lr": lr_tmp,
-                        "epoch": epoch,
-                        "vis/lr_slice": wandb.Image(lr_mid, caption="LR input"),
-                        "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
-                        "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
-                        "vis/I_t_slice": wandb.Image(I_t_mid, caption="I_t"),
-                    }
-                )
+                # wandb.log(
+                #     {
+                #         "train/psnr_epoch": psnr_epoch,
+                #         "train/psnr_pred_epoch": psnr_pred_epoch,
+                #         "train/loss_epoch": loss_iter_epoch,
+                #         "train/lr": lr_tmp,
+                #         "epoch": epoch,
+                #         "vis/lr_slice": wandb.Image(lr_mid, caption="LR input"),
+                #         "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
+                #         "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
+                #     }
+                # )
 
             log = (
                 f"epoch[{epoch + 1}/{args.max_epoch}] "
@@ -256,8 +235,8 @@ def main():
                     args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
                 )
 
-    if is_main:
-        wandb.finish()
+    # if is_main:
+    #     wandb.finish()
 
     dist.destroy_process_group()
 
