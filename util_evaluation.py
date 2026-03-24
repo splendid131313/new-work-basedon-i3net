@@ -77,9 +77,9 @@ def ssim(img1, img2, window_size = 11, size_average = True):
 
 #########################
 # PSNR
-def calc_psnr(img1, img2, max=1):
+def calc_psnr(img1, img2, max=1, eps=1e-10):
     mse = ((img1-img2)**2).mean()
-    return 10. * ((max**2)/(mse)).log10()
+    return 10. * ((max**2)/(mse + eps)).log10()
 
 ##########################
 # SSIM

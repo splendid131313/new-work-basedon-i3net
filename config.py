@@ -63,10 +63,9 @@ def get_args():
     """Parses all of the arguments above
     """
     args, unparsed = parser.parse_known_args()
-    if len(args.gpu_id.split(',')) > 0:   
-        setattr(args, 'cuda', True)
-    else:
-        setattr(args, 'cuda', False)
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
+    gpu_ok = args.gpu_id.strip().lower() not in ('', '-1', 'none')
+    setattr(args, 'cuda', gpu_ok and torch.cuda.is_available())
     if len(unparsed) > 1:
         print("Unparsed args: {}".format(unparsed))
     

@@ -19,6 +19,7 @@ class trainSet(Dataset):
         self.args = args
         self.data_root = data_root
         self.folder_list = [(data_root + '/' + f) for f in os.listdir(data_root)]
+        # self.folder_list = self.folder_list[:200]
         random.shuffle(self.folder_list)
         
         self.file_len = len(self.folder_list)
