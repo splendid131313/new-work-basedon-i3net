@@ -50,7 +50,7 @@ class trainSet(Dataset):
                 volume = volume[::-1,:,:].copy()
 
             # volume = util.crop_center(volume,256,256) #[256,256,7]
-            volume = util.resize_volume(volume, 256, 256)
+            volume = util.crop_center(volume, 256, 256)
             volume=torch.from_numpy(volume)
             return volume
 
@@ -78,7 +78,7 @@ class testSet(Dataset):
         # volumeIn = volumeIn['image'] #[h,w,s] [0,4095]
         volumeIn = np.load(volumepath)
         # volumeIn = util.crop_center(volumeIn,256,256)
-        volumeIn = util.resize_volume(volumeIn, 256, 256)
+        volumeIn = util.crop_center(volumeIn, 256, 256)
         volumeIn = util.normalize(volumeIn).astype(np.float32)
         volumeIn=torch.from_numpy(volumeIn) # w,h,s
         

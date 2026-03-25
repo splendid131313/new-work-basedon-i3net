@@ -15,19 +15,6 @@ def crop_center(img,cropx,cropy):
     starty = y//2 - cropy//2    
     return img[starty:starty+cropy, startx:startx+cropx, :]
 
-def resize_volume(img, new_h, new_w, mode="bilinear"):
-    # [H, W, C] -> [1, C, H, W]
-    if isinstance(img, np.ndarray):
-        tensor = torch.from_numpy(img.astype(np.float32))
-    else:
-        tensor = img.float()
-    tensor = tensor.permute(2, 0, 1).unsqueeze(0)  # [1, C, H, W]
-
-    out = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
-    out = out.squeeze(0).permute(1, 2, 0).cpu().numpy()  # [new_h, new_w, C]
-
-    return out
-
 def normalize(slice):
     eps = 1e-8
     if isinstance(slice, np.ndarray):

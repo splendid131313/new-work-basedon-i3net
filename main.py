@@ -69,7 +69,7 @@ loss_function = Select_Loss(args).cuda()
 ########################### train ###################################
 # log
 wandb.init(
-    project="i3net",
+    project="i3net_baseline",
     name="train_i3",
     config=args.__dict__,
 )
@@ -83,6 +83,7 @@ model.train()
 for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
     loss_epoch = 0
     psnr_epoch = 0
+    psnr_slice_epoch = 0
 
     for iter, hr in tqdm(enumerate(dataloader)):
                  
@@ -109,36 +110,57 @@ for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
             loss_iter.backward()
             optimizer.step()
 
-        psnr_iter = 0
+        psnr_volume_iter = []
+        psnr_slice_iter = []
+        pred_slices = [slice_idx for slice_idx in range(gt.shape[3]) if slice_idx % args.upscale != 0]
         for bz in range(gt.shape[0]):
-            psnr_iter += calc_psnr(gt[bz, :, :, :],sr[bz, :, :, :]).item()
-        psnr_iter /= (bz+1)  
+            psnr_volume_iter.append(calc_psnr(gt[bz, :, :, :],sr[bz, :, :, :]).item())
+            psnr_slice_bz = []
+            for slice_idx in pred_slices:
+                psnr = calc_psnr(gt[bz, :, :, slice_idx], sr[bz, :, :, slice_idx]).item()
+                psnr_slice_bz.append(psnr)
+            psnr_slice_bz = sum(psnr_slice_bz) / len(psnr_slice_bz) 
+            log = r"psnr_slice_bz[{}/{}] psnr:{:.6f}"\
+                .format(bz, gt.shape[0], psnr_slice_bz)
+            print(log)
+            wandb.log(
+                {
+                    "train/psnr_slice_bz": psnr_slice_bz,
+                }
+            )
+            psnr_slice_iter.append(psnr_slice_bz)
+        psnr_volume_iter = sum(psnr_volume_iter) / len(psnr_volume_iter)
+        psnr_slice_iter = sum(psnr_slice_iter) / len(psnr_slice_iter)
+
 
         #### log ####    
         lr_tmp = optimizer.state_dict()['param_groups'][0]['lr']
-        log = r"epoch[{}/{}] iter[{}/{}] psnrTr:{:.6f} lossTr:{:.12f} lr:{:.12f}"\
+        log = r"epoch[{}/{}] iter[{}/{}] psnr_volume_Tr:{:.6f} psnr_slice_Tr:{:.6f} lossTr:{:.12f} lr:{:.12f}"\
             .format(epoch+1, args.max_epoch , \
                 iter+1, len(dataloader),\
-                psnr_iter,loss_iter,lr_tmp)
+                psnr_volume_iter, psnr_slice_iter, loss_iter, lr_tmp)
         now = str(datetime.datetime.now())
         print(now+' '+log)
 
         loss_epoch += loss_iter
-        psnr_epoch += psnr_iter
+        psnr_epoch += psnr_volume_iter
+        psnr_slice_epoch += psnr_slice_iter
 
     loss_epoch /= (iter+1)
     psnr_epoch /= (iter+1)
+    psnr_slice_epoch /= (iter+1)
 
     with torch.no_grad():
-        b, h, w, s = gt.shape
-        mid_s = s // 2
-        lr_mid = lr[0, :, :, lr.shape[3] // 2].detach().cpu().float().numpy()
-        sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
-        gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
+        clamp_sr = torch.clamp(sr, 0, 1)
+        lr_mid = lr[0, :, :, 1].detach().cpu().float().numpy()
+        sr_mid = clamp_sr[0, :, :, 1].detach().cpu().float().numpy()
+        gt_mid = gt[0, :, :, 1].detach().cpu().float().numpy()
+
 
         wandb.log(
             {
                 "train/psnr_epoch": psnr_epoch,
+                "train/psnr_slice_epoch": psnr_slice_epoch,
                 "train/loss_epoch": loss_epoch,
                 "train/lr": lr_tmp,
                 "epoch": epoch,
@@ -163,9 +185,9 @@ for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
 
     epoch +=1
 
-    log = r"epoch[{}/{}] psnrTr:{:.6f} lossTr:{:.12f} lr:{:.12f}"\
+    log = r"epoch[{}/{}] psnrTr:{:.6f} psnr_slice_Tr:{:.6f} lossTr:{:.12f} lr:{:.12f}"\
     .format(epoch, args.max_epoch , \
-        psnr_epoch,loss_epoch,lr_tmp)
+        psnr_epoch, psnr_slice_epoch, loss_epoch, lr_tmp)
     now = str(datetime.datetime.now())
     print(now+' '+log)
     # with open(args.ckpt_dir + '/logs.txt',mode='a+') as f:
