@@ -28,8 +28,8 @@ torch.manual_seed(GLOBAL_SEED)
 torch.cuda.manual_seed(GLOBAL_SEED)
 torch.cuda.manual_seed_all(GLOBAL_SEED)
 
-args.ckpt_dir = '/remote-home/xxyang/i3net/'+args.ckpt_dir
-os.makedirs(args.ckpt_dir,exist_ok=True)
+args.ckpt_dir = '/experiments/' + args.ckpt_dir
+os.makedirs(args.ckpt_dir, exist_ok=True)
 
 args.parallel = len(args.gpu_id.split(',')) > 1
 
@@ -37,7 +37,7 @@ args.parallel = len(args.gpu_id.split(',')) > 1
 trainset = trainSet(data_root=args.traindata_path,args=args)
 # batch_size = args.batch_size*len(device_ids)
 dataloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size,\
-                shuffle=False,num_workers=args.num_workers, pin_memory=False)
+                shuffle=False, num_workers=args.num_workers, pin_memory=False)
 
 # model
 model = select_model(args)
@@ -64,13 +64,11 @@ scheduler = optim.select_scheduler(args,optimizer)
 #### loss ####
 loss_function = Select_Loss(args).cuda()
 
-
-
 ########################### train ###################################
 # log
 wandb.init(
     project="i3net_baseline",
-    name="train_i3",
+    name="",
     config=args.__dict__,
 )
 
