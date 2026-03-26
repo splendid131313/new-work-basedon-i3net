@@ -15,16 +15,28 @@ def crop_center(img,cropx,cropy):
     starty = y//2 - cropy//2    
     return img[starty:starty+cropy, startx:startx+cropx, :]
 
-def normalize(slice):
+def normalize(x, return_stats: bool = False):
+    """
+    Min-max normalize to [0, 1].
+
+    If return_stats=True, also returns (vmin, vmax) for denormalization.
+    """
     eps = 1e-8
-    if isinstance(slice, np.ndarray):
-        ma = slice.max()
-        mi = slice.min()
-        return (slice - mi) / (ma - mi + eps)
+    if isinstance(x, np.ndarray):
+        vmax = x.max()
+        vmin = x.min()
+        y = (x - vmin) / (vmax - vmin + eps)
+        return (y, float(vmin), float(vmax)) if return_stats else y
     else:  # torch.Tensor
-        ma = slice.max()
-        mi = slice.min()
-        return (slice - mi) / (ma - mi + eps)
+        vmax = x.max()
+        vmin = x.min()
+        y = (x - vmin) / (vmax - vmin + eps)
+        return (y, vmin, vmax) if return_stats else y
+
+
+def denormalize(x, vmin, vmax):
+    """Inverse of normalize(): x in [0,1] -> original scale."""
+    return x * (vmax - vmin) + vmin
 
 class RandomCrop3d(object):
     """

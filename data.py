@@ -79,11 +79,12 @@ class testSet(Dataset):
         volumeIn = np.load(volumepath)
         # volumeIn = util.crop_center(volumeIn,256,256)
         volumeIn = util.crop_center(volumeIn, 256, 256)
-        volumeIn = util.normalize(volumeIn).astype(np.float32)
-        volumeIn=torch.from_numpy(volumeIn) # w,h,s
+        volume_norm, vmin, vmax = util.normalize(volumeIn, return_stats=True)
+        volume_norm = volume_norm.astype(np.float32)
+        volume_norm = torch.from_numpy(volume_norm)  # [h,w,s]
         
         name = volumepath.split('/')[-1].split('.')[0]
-        return name,volumeIn # [h,w,slice]
+        return name, volume_norm, np.float32(vmin), np.float32(vmax)  # [h,w,slice] + stats
 
     def __len__(self):
         return self.file_len

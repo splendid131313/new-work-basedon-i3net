@@ -119,15 +119,7 @@ for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
             for slice_idx in pred_slices:
                 psnr = calc_psnr(gt[bz, :, :, slice_idx], sr[bz, :, :, slice_idx]).item()
                 psnr_slice_bz.append(psnr)
-            psnr_slice_bz = sum(psnr_slice_bz) / len(psnr_slice_bz) 
-            log = r"psnr_slice_bz[{}/{}] psnr:{:.6f}"\
-                .format(bz, gt.shape[0], psnr_slice_bz)
-            print(log)
-            wandb.log(
-                {
-                    "train/psnr_slice_bz": psnr_slice_bz,
-                }
-            )
+            psnr_slice_bz = sum(psnr_slice_bz) / len(psnr_slice_bz)
             psnr_slice_iter.append(psnr_slice_bz)
         psnr_volume_iter = sum(psnr_volume_iter) / len(psnr_volume_iter)
         psnr_slice_iter = sum(psnr_slice_iter) / len(psnr_slice_iter)
