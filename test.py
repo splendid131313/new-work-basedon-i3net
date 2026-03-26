@@ -30,7 +30,7 @@ def main():
     model = model.cuda()
     model.eval()
 
-    testset = testSet(data_root=args.testdata_path, image_size=args.image_size)
+    testset = testSet(data_root=args.testdata_path)
     dataloader = torch.utils.data.DataLoader(testset, batch_size=1,
     drop_last=False, shuffle=False, num_workers=4, pin_memory=False)
 
