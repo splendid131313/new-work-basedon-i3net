@@ -1,15 +1,9 @@
- # random
-
 import os
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from torch.utils.data import Dataset
 import random
-import nibabel as nib
-import random 
 
-import pickle
 import util
 
 
@@ -50,7 +44,7 @@ class trainSet(Dataset):
                 volume = volume[::-1,:,:].copy()
 
             # volume = util.crop_center(volume,256,256) #[256,256,7]
-            volume = util.crop_center(volume, 256, 256)
+            volume = util.crop_center(volume, self.args.image_size, self.args.image_size)
             volume=torch.from_numpy(volume)
             return volume
 
@@ -66,8 +60,9 @@ class trainSet(Dataset):
 
 
 class testSet(Dataset):
-    def __init__(self, data_root):
+    def __init__(self, data_root, image_size=256):
         self.data_root = data_root
+        self.image_size = image_size
         self.trainlist = [(data_root + '/' + f) for f in os.listdir(data_root)]
 
         self.file_len = len(self.trainlist)
@@ -78,7 +73,7 @@ class testSet(Dataset):
         # volumeIn = volumeIn['image'] #[h,w,s] [0,4095]
         volumeIn = np.load(volumepath)
         # volumeIn = util.crop_center(volumeIn,256,256)
-        volumeIn = util.crop_center(volumeIn, 256, 256)
+        volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
         volume_norm, vmin, vmax = util.normalize(volumeIn, return_stats=True)
         volume_norm = volume_norm.astype(np.float32)
         volume_norm = torch.from_numpy(volume_norm)  # [h,w,s]

@@ -18,6 +18,7 @@ data_arg.add_argument('--data_type', type=str, default='direct')
 data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
 data_arg.add_argument('--traindata_path', type=str, default='')
 data_arg.add_argument('--testdata_path', type=str, default='')
+data_arg.add_argument('--image_size', type=str, default='256')
 
 
 # Model

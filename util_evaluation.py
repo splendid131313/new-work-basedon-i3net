@@ -85,7 +85,17 @@ def calc_psnr(img1, img2, max=1, eps=1e-10):
 ##########################
 # SSIM
 def calc_ssim(img1,img2):
-    compute_ssim=SSIM().to(img1.device)
-    ssim=compute_ssim(img1.double(),img2.double())
-    return ssim.item()
+    def _to_4d(x):
+        # SSIM expects NCHW
+        if x.dim() == 2:  # H, W
+            return x.unsqueeze(0).unsqueeze(0)
+        if x.dim() == 3:  # H, W, S
+            return x.permute(2, 0, 1).unsqueeze(1)
+        if x.dim() == 4:  # already N, C, H, W
+            return x
+        raise ValueError(f"calc_ssim expects 2D/3D/4D input, but got shape: {tuple(x.shape)}")
+
+    img1_4d = _to_4d(img1).double()
+    img2_4d = _to_4d(img2).double()
+    return ssim(img1_4d, img2_4d).item()
 
