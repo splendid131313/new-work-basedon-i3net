@@ -28,7 +28,7 @@ torch.manual_seed(GLOBAL_SEED)
 torch.cuda.manual_seed(GLOBAL_SEED)
 torch.cuda.manual_seed_all(GLOBAL_SEED)
 
-args.ckpt_dir = '/experiments/' + args.ckpt_dir
+args.ckpt_dir = 'experiments/' + args.ckpt_dir
 os.makedirs(args.ckpt_dir, exist_ok=True)
 
 args.parallel = len(args.gpu_id.split(',')) > 1
