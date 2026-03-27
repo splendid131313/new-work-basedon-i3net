@@ -102,11 +102,10 @@ class GDFN(nn.Module):
 #####################################################################
 class IntraSliceBranch(nn.Module):
     def __init__(self,conv=nn.Conv2d,n_feat=64,kernel_size=3,bias=True,
-                 head_num=1,win_num_sqrt=16,window_size=16):
+                 head_num=1,win_num_sqrt=16, image_size=256):
         super().__init__()
         
         self.win_num_sqrt = win_num_sqrt
-        self.window_size = window_size
 
         self.dct = DCT2x()
         self.norm = nn.LayerNorm(n_feat)
@@ -119,7 +118,7 @@ class IntraSliceBranch(nn.Module):
 
         chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
         self.attn = nn.Sequential(
-            PreNormResidual(dim=n_feat, fn=FeedForward(dim=win_num_sqrt**2, expansion_factor=1, dropout=0, dense=chan_first)), # dim=num_patch
+            PreNormResidual(dim=n_feat, fn=FeedForward(dim=(image_size//win_num_sqrt)**2, expansion_factor=1, dropout=0, dense=chan_first)), # dim=num_patch
             PreNormResidual(dim=n_feat, fn=FeedForward(dim=n_feat, expansion_factor=2, dropout=0, dense=chan_last)) # dim=h*w*c 
         )
         self.last_conv = conv(n_feat,n_feat,kernel_size=1,bias=bias)
@@ -133,7 +132,7 @@ class IntraSliceBranch(nn.Module):
         x_dct = self.conv(x_dct)
 
         x_dct_windows = window_partitions(x_dct,window_size=h//self.win_num_sqrt) # [b,c,h,w]
-     
+
         bi,ci,hi,wi = x_dct_windows.shape
         x_dct_windows = einops.rearrange(x_dct_windows,'b c h w -> b (h w) c')
         x_dct_windows_attn = self.attn(x_dct_windows)
@@ -150,7 +149,7 @@ class IntraSliceBranch(nn.Module):
 class I2Block(nn.Module):
     def __init__(
         self, conv, n_feat, kernel_size,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
+        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16, image_size=256):
         super(I2Block, self).__init__()
         inter_slice_branch = [
             nn.PixelUnshuffle(2),
@@ -164,7 +163,7 @@ class I2Block(nn.Module):
         self.res_scale = res_scale
 
         self.intra_slice_branch = IntraSliceBranch(conv=nn.Conv2d,n_feat=n_feat,kernel_size=kernel_size,bias=bias
-                                  ,head_num=head_num,win_num_sqrt=win_num_sqrt,window_size=window_size)
+                                  ,head_num=head_num,win_num_sqrt=win_num_sqrt, image_size=image_size)
 
     def forward(self, x):
         x_inter = self.inter_slice_branch(x).mul(self.res_scale)
@@ -175,11 +174,11 @@ class I2Block(nn.Module):
 class I2Group(nn.Module):
     def __init__(
         self, conv, n_depth, n_feat, kernel_size,skip_connect=False,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
+        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16, image_size=256):
         super().__init__()
 
         body = [I2Block(conv, n_feat, kernel_size,
-                            bias, bn, act, res_scale,head_num,win_num_sqrt) for _ in range(n_depth)]
+                            bias, bn, act, res_scale,head_num,win_num_sqrt, image_size) for _ in range(n_depth)]
 
         self.body = nn.Sequential(*body)
     def forward(self,x):
@@ -197,8 +196,10 @@ class DWConv(nn.Sequential):
         )
 
 class CrossViewBlock(nn.Module):
-    def __init__(self,n_feat):
+    def __init__(self,n_feat, image_size):
         super().__init__()
+        
+        self.image_size = image_size
 
         self.norm = nn.LayerNorm(n_feat)
 
@@ -206,9 +207,9 @@ class CrossViewBlock(nn.Module):
             nn.Conv2d(n_feat,n_feat,1,1,0),
             Rearrange('b c h w -> b h c w'),
             nn.PixelShuffle(2),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(image_size//4, n_feat,3,1,1),
             nn.ReLU(),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(n_feat,image_size//4,3,1,1),
             nn.PixelUnshuffle(2),
             Rearrange('b h c w -> b c h w'),
         )
@@ -217,9 +218,9 @@ class CrossViewBlock(nn.Module):
             nn.Conv2d(n_feat,n_feat,1,1,0),
             Rearrange('b c h w -> b w c h'),
             nn.PixelShuffle(2),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(image_size//4,n_feat,3,1,1),
             nn.ReLU(),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(n_feat,image_size//4,3,1,1),
             nn.PixelUnshuffle(2),
             Rearrange('b w c h -> b c h w'),
         )
@@ -246,10 +247,10 @@ class I3Net(nn.Module):
         res_scale = args.res_scale # 1
         in_slice = args.lr_slice_patch*1
         out_slice = args.hr_slice_patch
+        image_size = args.image_size
 
         head_num = args.head_num
         win_num_sqrt = args.win_num_sqrt
-        window_size = args.window_size
         self.head = nn.Sequential(conv(in_slice,n_feats,kernel_size),
                                   nn.ReLU(),
                                   conv(n_feats,n_feats,kernel_size))
@@ -257,10 +258,10 @@ class I3Net(nn.Module):
         modules_body = [
             I2Group(
                 conv, n_depth=2,n_feat=n_feats, kernel_size=kernel_size, act=act, res_scale=res_scale, 
-                head_num=head_num, win_num_sqrt=win_num_sqrt,window_size=window_size) for _ in range(num_blocks//2)]
+                head_num=head_num, win_num_sqrt=win_num_sqrt, image_size=image_size) for _ in range(num_blocks//2)]
         self.body = nn.ModuleList(modules_body)
         
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats) for _ in range(3)])
+        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=image_size) for _ in range(3)])
 
         self.fuse_align = nn.Conv2d(3*n_feats,n_feats,1,1,0)
 
@@ -310,11 +311,11 @@ if __name__ == '__main__':
     args.hr_slice_patch = (args.lr_slice_patch-1)*args.upscale + 1
     args.head_num = 1
     args.win_num_sqrt = 16
-    args.n_size = 256
+    args.image_size = 32
 
     gpy_id = 0
     model = I3Net(args).cuda(gpy_id)
-    x = torch.ones(1,args.n_size,args.n_size,args.lr_slice_patch).cuda(gpy_id)
-    y = torch.ones(1,args.n_size,args.n_size,args.hr_slice_patch).cuda(gpy_id)
+    x = torch.ones(1,args.image_size,args.image_size,args.lr_slice_patch).cuda(gpy_id)
+    y = torch.ones(1,args.image_size,args.image_size,args.hr_slice_patch).cuda(gpy_id)
     pred=model(x)
     print(pred.shape)

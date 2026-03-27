@@ -1,9 +1,15 @@
+ # random
+
 import os
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 import random
+import nibabel as nib
+import random 
 
+import pickle
 import util
 
 
@@ -12,6 +18,7 @@ class trainSet(Dataset):
                 random_crop=None, resize=None, augment_s=True, augment_t=True):
         self.args = args
         self.data_root = data_root
+        self.image_size = args.image_size
         self.folder_list = [(data_root + '/' + f) for f in os.listdir(data_root)]
         random.shuffle(self.folder_list)
         
@@ -44,8 +51,8 @@ class trainSet(Dataset):
                 volume = volume[::-1,:,:].copy()
 
             # volume = util.crop_center(volume,256,256) #[256,256,7]
-            # volume = util.resize(volume, 480, 480)
-            volume = util.crop_center(volume, 256, 256)
+            # volume = util.resize(volume, self.image_size, self.image_size)
+            volume = util.crop_center(volume, self.image_size, self.image_size)
             volume=torch.from_numpy(volume)
             return volume
 
@@ -61,8 +68,9 @@ class trainSet(Dataset):
 
 
 class testSet(Dataset):
-    def __init__(self, data_root):
+    def __init__(self, data_root, image_size):
         self.data_root = data_root
+        self.image_size = image_size
         self.trainlist = [(data_root + '/' + f) for f in os.listdir(data_root)]
 
         self.file_len = len(self.trainlist)
@@ -73,14 +81,13 @@ class testSet(Dataset):
         # volumeIn = volumeIn['image'] #[h,w,s] [0,4095]
         volumeIn = np.load(volumepath)
         # volumeIn = util.crop_center(volumeIn,256,256)
-        # volumeIn = util.resize(volumeIn, 480, 480)
-        volumeIn = util.crop_center(volumeIn, 256, 256)
-        volume_norm, vmin, vmax = util.normalize(volumeIn, return_stats=True)
-        volume_norm = volume_norm.astype(np.float32)
-        volume_norm = torch.from_numpy(volume_norm)  # [h,w,s]
+        # volumeIn = util.resize(volumeIn, self.image_size, self.image_size)
+        volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
+        volumeIn = util.normalize(volumeIn).astype(np.float32)
+        volumeIn=torch.from_numpy(volumeIn) # w,h,s
         
         name = volumepath.split('/')[-1].split('.')[0]
-        return name, volume_norm, np.float32(vmin), np.float32(vmax)  # [h,w,slice] + stats
+        return name,volumeIn # [h,w,slice]
 
     def __len__(self):
         return self.file_len
