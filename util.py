@@ -15,6 +15,32 @@ def crop_center(img,cropx,cropy):
     starty = y//2 - cropy//2    
     return img[starty:starty+cropy, startx:startx+cropx, :]
 
+
+def resize(volume: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """
+    Resize a 3D volume in XY plane, keeping slice dimension unchanged.
+
+    Args:
+        volume: numpy array of shape [H, W, S]
+        out_h/out_w: target spatial size
+
+    Returns:
+        numpy array of shape [out_h, out_w, S]
+    """
+    if volume.ndim != 3:
+        raise ValueError(f"resize_volume_xy expects [H,W,S], got shape: {volume.shape}")
+    h, w, s = volume.shape
+    if h == out_h and w == out_w:
+        return volume
+
+    # [H,W,S] -> [S,1,H,W]
+    t = torch.from_numpy(volume).unsqueeze(0)  # [1,H,W,S]
+    t = t.permute(3, 0, 1, 2).contiguous()     # [S,1,H,W]
+    t = F.interpolate(t, size=(out_h, out_w), mode="bilinear", align_corners=False)
+    # [S,1,out_h,out_w] -> [out_h,out_w,S]
+    t = t.permute(2, 3, 0, 1).contiguous().squeeze(-1)
+    return t.cpu().numpy()
+
 def normalize(x, return_stats: bool = False):
     """
     Min-max normalize to [0, 1].
