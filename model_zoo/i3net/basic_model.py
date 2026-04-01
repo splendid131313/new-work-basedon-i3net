@@ -1,18 +1,11 @@
-import torch
 import torch.nn as nn
-from torch.nn import init
 import einops
 from functools import partial
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 
 from .dct_util import DCT2x,IDCT2x
-from .flow_module import FlowModule
-# from .utils_win import window_partitionx,window_reversex
 
-
-def make_model(args):
-    return I3Net(args)
 
 #####################################################################
 def default_conv(in_channelss, out_channels, kernel_size, bias=True):
@@ -61,7 +54,6 @@ def window_reverses(windows, window_size, H, W):
     return x
 
 
-
 pair = lambda x: x if isinstance(x, tuple) else (x, x)
 
 class PreNormResidual(nn.Module):
@@ -103,11 +95,11 @@ class GDFN(nn.Module):
 #####################################################################
 class IntraSliceBranch(nn.Module):
     def __init__(self,conv=nn.Conv2d,n_feat=64,kernel_size=3,bias=True,
-                 head_num=1,win_num_sqrt=16,window_size=16):
+                 head_num=1, win_num_sqrt=16, window_size=16):
         super().__init__()
-        
-        self.win_num_sqrt = win_num_sqrt
+
         self.window_size = window_size
+        self.win_num_sqrt = win_num_sqrt
 
         self.dct = DCT2x()
         self.norm = nn.LayerNorm(n_feat)
@@ -120,8 +112,8 @@ class IntraSliceBranch(nn.Module):
 
         chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
         self.attn = nn.Sequential(
-            PreNormResidual(dim=n_feat, fn=FeedForward(dim=win_num_sqrt**2, expansion_factor=1, dropout=0, dense=chan_first)), # dim=num_patch
-            PreNormResidual(dim=n_feat, fn=FeedForward(dim=n_feat, expansion_factor=2, dropout=0, dense=chan_last)) # dim=h*w*c 
+            PreNormResidual(dim=n_feat, fn=FeedForward(dim=window_size**2, expansion_factor=1, dropout=0, dense=chan_first)), # dim=num_patch
+            PreNormResidual(dim=n_feat, fn=FeedForward(dim=n_feat, expansion_factor=2, dropout=0, dense=chan_last)) # dim=h*w*c
         )
         self.last_conv = conv(n_feat,n_feat,kernel_size=1,bias=bias)
 
@@ -133,7 +125,7 @@ class IntraSliceBranch(nn.Module):
         x_dct = einops.rearrange(x_dct,'b (h w) c -> b c h w',h=h,w=w)
         x_dct = self.conv(x_dct)
 
-        x_dct_windows = window_partitions(x_dct,window_size=h//self.win_num_sqrt) # [b,c,h,w]
+        x_dct_windows = window_partitions(x_dct,window_size=self.window_size) # [b,c,h,w]
      
         bi,ci,hi,wi = x_dct_windows.shape
         x_dct_windows = einops.rearrange(x_dct_windows,'b c h w -> b (h w) c')
@@ -141,58 +133,35 @@ class IntraSliceBranch(nn.Module):
         x_dct_windows = x_dct_windows + x_dct_windows_attn
         x_dct_windows = einops.rearrange(x_dct_windows,'b (h w) c -> b c h w',h=hi,w=wi)
         
-        x_dct_attn =  window_reverses(x_dct_windows,window_size=h//self.win_num_sqrt,H=h,W=w)
+        x_dct_attn =  window_reverses(x_dct_windows,window_size=self.window_size,H=h,W=w)
 
         x_dct_idct = self.idct(x_dct_attn)
         x_attn = self.last_conv(x_dct_idct)
 
         return x_attn
 
-class FlowEnchancedInterSliceBranch(nn.Module):
-    def __init__(self, n_feat):
-        super().__init__()
-        intra_slice_branch = [
-            nn.PixelUnshuffle(2),
-            nn.Conv2d(4*n_feat,4*n_feat,3,1,1),
-            nn.ReLU(),
-            nn.Conv2d(4*n_feat,4*n_feat,3,1,1), # +
-            nn.PixelShuffle(2), # +
-            nn.Conv2d(n_feat,n_feat,1,1,0)
-        ]
-        self.intra_slice_branch = nn.Sequential(*intra_slice_branch)
-        self.flow_module = FlowModule(n_feat=n_feat)
-        self.fusion = nn.Sequential(
-            nn.Conv2d(n_feat*2, n_feat, 3, 1, 1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat, n_feat, 3, 1, 1),
-        )
-
-
-    def forward(self, x, i_start, i_end, t=0.5):
-        x = self.intra_slice_branch(x)
-
-        I_t, flow = self.flow_module(i_start, i_end, t)
-
-        fusion = self.fusion(torch.cat([x, I_t], dim=1))
-
-        return x + fusion
-
 class I2Block(nn.Module):
     def __init__(
         self, conv, n_feat, kernel_size,
         bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
         super(I2Block, self).__init__()
-        self.flow_enchanced_inter_slice_branch = FlowEnchancedInterSliceBranch(n_feat=n_feat)
+        inter_slice_branch = [
+            nn.PixelUnshuffle(2),
+            nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1),  # +
+            nn.PixelShuffle(2),  # +
+            nn.Conv2d(n_feat, n_feat, 1, 1, 0)
+        ]
+        self.inter_slice_branch = nn.Sequential(*inter_slice_branch)
 
         self.res_scale = res_scale
 
         self.intra_slice_branch = IntraSliceBranch(conv=nn.Conv2d,n_feat=n_feat,kernel_size=kernel_size,bias=bias
                                   ,head_num=head_num,win_num_sqrt=win_num_sqrt,window_size=window_size)
 
-    def forward(self, x, i_start, i_end):
-        x_inter = self.flow_enchanced_inter_slice_branch(x, i_start, i_end).mul(
-            self.res_scale
-        )
+    def forward(self, x):
+        x_inter = self.inter_slice_branch(x).mul(self.res_scale)
         x_intra = self.intra_slice_branch(x)
         out = x_inter + x_intra + x
         return out
@@ -204,13 +173,13 @@ class I2Group(nn.Module):
         super().__init__()
 
         body = [I2Block(conv, n_feat, kernel_size,
-                            bias, bn, act, res_scale,head_num,win_num_sqrt) for _ in range(n_depth)]
+                            bias, bn, act, res_scale,head_num,win_num_sqrt, window_size) for _ in range(n_depth)]
 
         self.body = nn.ModuleList(body)
-    def forward(self,x,i_start,i_end):
+    def forward(self,x):
         res = x
         for block in self.body:
-            res = block(res,i_start,i_end)
+            res = block(res)
         out = res
         return out
 
@@ -224,8 +193,9 @@ class DWConv(nn.Sequential):
         )
 
 class CrossViewBlock(nn.Module):
-    def __init__(self,n_feat):
+    def __init__(self,n_feat, image_size):
         super().__init__()
+        self.image_size = image_size
 
         self.norm = nn.LayerNorm(n_feat)
 
@@ -233,9 +203,9 @@ class CrossViewBlock(nn.Module):
             nn.Conv2d(n_feat,n_feat,1,1,0),
             Rearrange('b c h w -> b h c w'),
             nn.PixelShuffle(2),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(image_size // 4, n_feat, 3, 1, 1),
             nn.ReLU(),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(n_feat, image_size // 4, 3, 1, 1),
             nn.PixelUnshuffle(2),
             Rearrange('b h c w -> b c h w'),
         )
@@ -244,9 +214,9 @@ class CrossViewBlock(nn.Module):
             nn.Conv2d(n_feat,n_feat,1,1,0),
             Rearrange('b c h w -> b w c h'),
             nn.PixelShuffle(2),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(image_size // 4, n_feat, 3, 1, 1),
             nn.ReLU(),
-            nn.Conv2d(64,64,3,1,1),
+            nn.Conv2d(n_feat, image_size // 4, 3, 1, 1),
             nn.PixelUnshuffle(2),
             Rearrange('b w c h -> b c h w'),
         )
@@ -261,98 +231,3 @@ class CrossViewBlock(nn.Module):
         x_cor_f = self.conv_cor(x) # b c h w
         x_out = x_cor_f + x_sag_f
         return x_out
-
-class I3Net(nn.Module):
-    def __init__(self,args=None,conv=default_conv):
-        super(I3Net, self).__init__()
-        self.args = args
-        n_feats = args.n_feats #64
-        kernel_size = args.kernel_size # 3
-        num_blocks = args.num_blocks # 16
-        act = nn.ReLU(True)
-        res_scale = args.res_scale # 1
-        in_slice = args.lr_slice_patch*1
-        out_slice = args.hr_slice_patch
-
-        head_num = args.head_num
-        win_num_sqrt = args.win_num_sqrt
-        window_size = args.window_size
-        self.head = nn.Sequential(conv(in_slice,n_feats,kernel_size),
-                                  nn.ReLU(),
-                                  conv(n_feats,n_feats,kernel_size))
-        self.head_traj = nn.Sequential(
-            conv(in_slice-1, n_feats, kernel_size),
-            nn.ReLU(),
-            conv(n_feats, n_feats, kernel_size),
-        )
-        
-        modules_body = [
-            I2Group(
-                conv, n_depth=2,n_feat=n_feats, kernel_size=kernel_size, act=act, res_scale=res_scale, 
-                head_num=head_num, win_num_sqrt=win_num_sqrt,window_size=window_size) for _ in range(num_blocks//2)]
-        self.body = nn.ModuleList(modules_body)
-        
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats) for _ in range(3)])
-
-        self.fuse_align = nn.Conv2d(3*n_feats,n_feats,1,1,0)
-
-        modules_tail = [
-            conv(n_feats, n_feats, kernel_size),
-            nn.ReLU(),
-            conv(n_feats,out_slice,kernel_size)]
-        self.tail = nn.Sequential(*modules_tail)
-        
-    def forward(self, x):
-        x = x.permute(0,3,1,2)
-        i_start = x[:, :-1, :, :]
-        i_end = x[:, 1:, :, :]
-
-        x = x.contiguous()
-        x_head = self.head(x)
-        i_start = self.head_traj(i_start)
-        i_end = self.head_traj(i_end)
-
-        res = x_head
-
-        align_list = []
-        res = self.alignment[0](res)+res
-        align_list.append(res)
-
-        for id,layer in enumerate(self.body):
-            res = layer(res, i_start, i_end)
-            if id in [3,7]:
-                res = self.alignment[id//4+1](res) + res
-                align_list.append(res)
-
-        res = self.fuse_align(torch.cat(align_list,1))
-        
-        res += x_head       
-        
-        out = self.tail(res) # [bz,s,h,w]
-        
-        out[:,::self.args.upscale] = x
-        out = out.permute(0,2,3,1).contiguous()
-    
-        return out
-
-
-if __name__ == '__main__':
-    import argparse
-    args = argparse.Namespace()
-    args.upscale = 2
-    args.n_feats = 64
-    args.kernel_size = 3
-    args.res_scale = 1
-    args.num_blocks = 16
-    args.lr_slice_patch = 4
-    args.hr_slice_patch = (args.lr_slice_patch-1)*args.upscale + 1
-    args.head_num = 1
-    args.win_num_sqrt = 16
-    args.n_size = 256
-
-    gpy_id = 0
-    model = I3Net(args).cuda(gpy_id)
-    x = torch.ones(1,args.n_size,args.n_size,args.lr_slice_patch).cuda(gpy_id)
-    y = torch.ones(1,args.n_size,args.n_size,args.hr_slice_patch).cuda(gpy_id)
-    pred=model(x)
-    print(pred.shape)

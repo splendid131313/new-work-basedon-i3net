@@ -45,7 +45,7 @@ def main():
     torch.cuda.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
 
-    args.ckpt_dir = "experiments/" + args.model + "/" + args.ckpt_dir
+    args.ckpt_dir = "experiments/" + args.ckpt_dir
     if is_main:
         os.makedirs(args.ckpt_dir, exist_ok=True)
 
@@ -126,9 +126,6 @@ def main():
 
             gt = gt.to(device, non_blocking=True)
             lr = lr.to(device, non_blocking=True)
-            # i_start = gt[...,0].unsqueeze(1)
-            # i_end = gt[...,-1].unsqueeze(1)
-            # time_list = args.time_list[1:-1].to(device)
 
             optimizer.zero_grad()
 

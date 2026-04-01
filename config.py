@@ -18,6 +18,7 @@ data_arg.add_argument('--data_type', type=str, default='direct')
 data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
 data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/train')
 data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
+data_arg.add_argument('--image_size', type=int, default=256)
 
 
 # Model
@@ -26,6 +27,8 @@ model_arg.add_argument('--model', type=str, default='i3net', help='select model'
 model_arg.add_argument('--upscale', type=int, default=2, help='scale_factor')
 model_arg.add_argument("--resume", type=bool, default=False, help='run resume or not')
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
+model_arg.add_argument("--flow_cfg", type=str, default="flowseek-S.json")
+model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/weights/flowseek_T_CT.pth")
 
 
 # Training / test parameters
@@ -70,6 +73,7 @@ def get_args():
         print("Unparsed args: {}".format(unparsed))
     
     args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
-    args.time_list = torch.linspace(0, 1, args.hr_slice_patch)
+    args.lr_time_list = torch.linspace(0, 1, args.upscale - 1 + 2)
+    # args.hr_time_list = torch.linspace(0, 1, args.hr_slice_patch)
     return args, unparsed
 
