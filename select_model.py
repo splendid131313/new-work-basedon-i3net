@@ -36,7 +36,7 @@ def select_model(args):
 
     flow_state = load_flowseek_ckpt(args)
     missing_keys, unexpected_keys = model.flowseek.load_state_dict(
-        flow_state, strict=False
+        flow_state, strict=True
     )
     if len(missing_keys) > 0:
         print(f"Warning: Missing keys: {missing_keys}")

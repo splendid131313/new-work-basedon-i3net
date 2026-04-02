@@ -149,6 +149,8 @@ def main():
                 psnr_pred_iter = 0.0
                 for bz in range(gt.shape[0]):
                     psnr_iter += calc_psnr(gt[bz, :, :, :], sr[bz, :, :, :]).item()
+                    # TODO:
+                    # upscale > 2的时候，这里的索引是不合理的
                     psnr_pred_iter += calc_psnr(gt[bz, :, :, 1::args.upscale], sr[bz, :, :, 1::args.upscale]).item()
                 psnr_iter /= gt.shape[0]
                 psnr_pred_iter /= gt.shape[0]

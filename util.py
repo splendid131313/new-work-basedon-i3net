@@ -15,29 +15,54 @@ def crop_center(img,cropx,cropy):
     starty = y//2 - cropy//2    
     return img[starty:starty+cropy, startx:startx+cropx, :]
 
-def resize_volume(img, new_h, new_w, mode="bilinear"):
-    # [H, W, C] -> [1, C, H, W]
-    if isinstance(img, np.ndarray):
-        tensor = torch.from_numpy(img.astype(np.float32))
-    else:
-        tensor = img.float()
-    tensor = tensor.permute(2, 0, 1).unsqueeze(0)  # [1, C, H, W]
 
-    out = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
-    out = out.squeeze(0).permute(1, 2, 0).cpu().numpy()  # [new_h, new_w, C]
+def resize(volume: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    """
+    Resize a 3D volume in XY plane, keeping slice dimension unchanged.
 
-    return out
+    Args:
+        volume: numpy array of shape [H, W, S]
+        out_h/out_w: target spatial size
 
-def normalize(slice):
+    Returns:
+        numpy array of shape [out_h, out_w, S]
+    """
+    if volume.ndim != 3:
+        raise ValueError(f"resize_volume_xy expects [H,W,S], got shape: {volume.shape}")
+    h, w, s = volume.shape
+    if h == out_h and w == out_w:
+        return volume
+
+    # [H,W,S] -> [S,1,H,W]
+    t = torch.from_numpy(volume).unsqueeze(0)  # [1,H,W,S]
+    t = t.permute(3, 0, 1, 2).contiguous()     # [S,1,H,W]
+    t = F.interpolate(t, size=(out_h, out_w), mode="bilinear", align_corners=False)
+    # [S,1,out_h,out_w] -> [out_h,out_w,S]
+    t = t.permute(2, 3, 0, 1).contiguous().squeeze(-1)
+    return t.cpu().numpy()
+
+def normalize(x, return_stats: bool = False):
+    """
+    Min-max normalize to [0, 1].
+
+    If return_stats=True, also returns (vmin, vmax) for denormalization.
+    """
     eps = 1e-8
-    if isinstance(slice, np.ndarray):
-        ma = slice.max()
-        mi = slice.min()
-        return (slice - mi) / (ma - mi + eps)
+    if isinstance(x, np.ndarray):
+        vmax = x.max()
+        vmin = x.min()
+        y = (x - vmin) / (vmax - vmin + eps)
+        return (y, float(vmin), float(vmax)) if return_stats else y
     else:  # torch.Tensor
-        ma = slice.max()
-        mi = slice.min()
-        return (slice - mi) / (ma - mi + eps)
+        vmax = x.max()
+        vmin = x.min()
+        y = (x - vmin) / (vmax - vmin + eps)
+        return (y, vmin, vmax) if return_stats else y
+
+
+def denormalize(x, vmin, vmax):
+    """Inverse of normalize(): x in [0,1] -> original scale."""
+    return x * (vmax - vmin) + vmin
 
 class RandomCrop3d(object):
     """

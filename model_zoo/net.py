@@ -62,10 +62,7 @@ class I3Net(nn.Module):
             vol = vol.unsqueeze(1)  # (B, 1, H, W)
         rgb = vol.repeat(1, 3, 1, 1)  # (B, 3, H, W)
 
-        v_min = rgb.amin(dim=(2, 3), keepdim=True)
-        v_max = rgb.amax(dim=(2, 3), keepdim=True)
-        rgb01 = (rgb - v_min) / (v_max - v_min + 1e-6)
-        return (rgb01 * 255.0).clamp(0.0, 255.0)
+        return (rgb * 255.0).clamp(0.0, 255.0)
     
     def _get_align(self, i_start, i_end):
         self.flowseek.eval()
@@ -97,9 +94,11 @@ class I3Net(nn.Module):
         x = x.contiguous()
         i_start = x[:, :-1, :, :]
         i_end = x[:, 1:, :, :]
-
+        
+        # B, T, H, W = x.shape
+        # align = torch.zeros(B, 7, H, W).to(x.device)
         align = self._get_align(i_start, i_end)
-        align[:, ::self.args.upscale, :, :] += x
+        align[:, ::self.args.upscale, :, :] = x
         x_head = self.head(align)
 
         res = x_head
