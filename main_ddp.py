@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import Select_Loss
+from select_loss import compute_reprojection_loss
 
 
 def main():
@@ -85,7 +85,7 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = Select_Loss(args).to(device)
+    loss_function = compute_reprojection_loss
 
     # if is_main:
     #     wandb.init(
