@@ -4,6 +4,10 @@ from .i3net.basic_model import default_conv, I2Group, CrossViewBlock
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
 
+# from i3net.basic_model import default_conv, I2Group, CrossViewBlock
+# from flowseek.core.flowseek import FlowSeek
+# from i3net.flow_module import warp
+
 def make_model(args):
     return I3Net(args)
 
@@ -24,7 +28,7 @@ class I3Net(nn.Module):
         win_num_sqrt = args.win_num_sqrt
         window_size = args.image_size // args.win_num_sqrt
         self.head = nn.Sequential(
-            conv(out_slice, n_feats, kernel_size),
+            conv(in_slice + 2 * (len(self.time_list) * out_slice), n_feats, kernel_size),
             nn.ReLU(),
             conv(n_feats, n_feats, kernel_size),
         )
@@ -53,9 +57,14 @@ class I3Net(nn.Module):
         modules_tail = [
             conv(n_feats, n_feats, kernel_size),
             nn.ReLU(),
-            conv(n_feats, out_slice, kernel_size),
+            conv(n_feats, out_slice * 2, kernel_size),
         ]
         self.tail = nn.Sequential(*modules_tail)
+        tail_last = self.tail[-1]
+        with torch.no_grad():
+            nn.init.normal_(tail_last.weight[out_slice:], mean=0.0, std=1e-4)
+            if tail_last.bias is not None:
+                nn.init.zeros_(tail_last.bias[:out_slice])
 
     def _vol_to_flowseek_rgb(self, vol):  # vol: (B, 1, H, W) 或 (B, H, W)
         if vol.ndim == 3:
@@ -67,8 +76,15 @@ class I3Net(nn.Module):
     def _get_align(self, i_start, i_end):
         self.flowseek.eval()
         B, T, H, W = i_start.shape
-        align_list = []
-        align_list.append(torch.zeros((B, 1, H, W)).to(i_start.device))
+
+        w0_seq = torch.zeros((B, self.args.hr_slice_patch, H, W)).to(i_start.device)
+        w1_seq = torch.zeros((B, self.args.hr_slice_patch, H, W)).to(i_start.device)
+
+        for i in range(self.args.lr_slice_patch):
+            idx = i * self.args.upscale
+            w0_seq[:, idx, :, :] = i_start[:, i, :, :] if i < i_start.shape[1] else i_end[:, -1, :, :]
+            w1_seq[:, idx, :, :] = w0_seq[:, idx, :, :]
+
         for i in range(T):
             img0 = i_start[:, i, :, :]
             img1 = i_end[:, i, :, :]
@@ -77,29 +93,28 @@ class I3Net(nn.Module):
 
             with torch.no_grad():
                 flow = self.flowseek(img0, img1, test_mode=True)["final"]
-            for time in self.time_list:
+            for j in range(1, self.args.upscale):
+                time = j / self.args.upscale
+                curr_idx = i * self.args.upscale + j
+
                 img0t = warp(img0, flow * time)
                 imgt1 = warp(img1, flow * (1 - time))
-                imgt = (img0t + imgt1) / 2
-                imgt = torch.mean(imgt, dim=1, keepdim=True)
-                imgt = imgt / 255.0
-                align_list.append(imgt)
-            align_list.append(torch.zeros((B, 1, H, W)).to(i_start.device))
-        align_list = torch.cat(align_list, 1)
 
-        return align_list
+                w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
+                w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
+
+        return w0_seq, w1_seq
 
     def forward(self, x):
-        x = x.permute(0, 3, 1, 2)
-        x = x.contiguous()
+        x = x.permute(0, 3, 1, 2).contiguous()
         i_start = x[:, :-1, :, :]
         i_end = x[:, 1:, :, :]
         
         # B, T, H, W = x.shape
-        # align = torch.zeros(B, 7, H, W).to(x.device)
-        align = self._get_align(i_start, i_end)
-        align[:, ::self.args.upscale, :, :] = x
-        x_head = self.head(align)
+        warped0, warped1 = self._get_align(i_start, i_end)
+
+        align_input = torch.cat([x, warped0, warped1], 1)
+        x_head = self.head(align_input)
 
         res = x_head
 
@@ -117,7 +132,12 @@ class I3Net(nn.Module):
 
         res += x_head
 
-        out = self.tail(res)  # [bz,s,h,w]
+        raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
+
+        mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
+        delta = raw_output[:, self.args.hr_slice_patch :, :, :]
+
+        out = mask * warped0 + (1 - mask) * warped1 + delta
 
         out[:, :: self.args.upscale] = x
         out = out.permute(0, 2, 3, 1).contiguous()
@@ -131,7 +151,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--cfg", type=str, default="./flowseek/config/eval/flowseek-S.json"
+        "--cfg", type=str, default="./model_zoo/flowseek/config/eval/flowseek-S.json"
     )
 
     args = parse_args(parser)
@@ -139,7 +159,7 @@ if __name__ == "__main__":
     args.n_feats = 64
     args.kernel_size = 3
     args.res_scale = 1
-    args.num_blocks = 16
+    args.i_num_blocks = 16
     args.lr_slice_patch = 4
     args.hr_slice_patch = (args.lr_slice_patch - 1) * args.upscale + 1
     args.head_num = 1
