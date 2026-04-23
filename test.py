@@ -13,7 +13,7 @@ import util
 
 
 def main():
-    args.ckpt_dir = 'experiments/'+args.model+'/'+args.ckpt_dir
+    args.ckpt_dir = 'experiments/'+args.ckpt_dir
     os.makedirs(args.ckpt_dir,exist_ok=True)
     with open(args.ckpt_dir + '/logs_test.txt',mode='a+') as f:
         s = "\n\n\n\n\nSTART EXPERIMENT\n"
