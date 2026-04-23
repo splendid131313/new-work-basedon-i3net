@@ -79,6 +79,10 @@ def main():
         sr = torch.zeros_like(gt)
         sr_cnt = torch.zeros_like(gt)
 
+        psnr_slice = []
+        ssim_slice = []
+        psnr_volumes = []
+
         for i in range(lr.shape[2]-args.lr_slice_patch+1):
             tmp_lr = lr[...,i:i+args.lr_slice_patch]
             tmp_lr = tmp_lr.unsqueeze(0).cuda() #[1,s,h,w]
@@ -87,13 +91,11 @@ def main():
             with torch.no_grad():
                 tmp_sr = model(tmp_lr)
 
-            psnr_slice = []
-            ssim_slice = []
-
             tmp_sr_cpu = torch.clamp(tmp_sr.squeeze(0), 0, 1).detach().cpu()
             tmp_gt_cpu = tmp_gt.detach().cpu()
             
             psnr_volume = calc_psnr(tmp_gt_cpu, tmp_sr_cpu).item()
+            psnr_volumes.append(psnr_volume)
 
             pred_slices = [
                 slice_idx
@@ -105,20 +107,8 @@ def main():
                 ssim = calc_ssim(tmp_gt_cpu[..., slice_idx], tmp_sr_cpu[..., slice_idx])
                 psnr_slice.append(psnr)
                 ssim_slice.append(ssim)
-            psnr_slice = sum(psnr_slice) / max(len(psnr_slice), 1)
-            ssim_slice = sum(ssim_slice) / max(len(ssim_slice), 1)
-            average_psnr_slice.append(psnr_slice)
-            average_ssim_slice.append(ssim_slice)
 
             tmp_sr = tmp_sr_cpu
-            
-            log = r"[{} : {}] NAME:{} psnr_volume:{} psnr_slice:{} ssim_slice:{}"\
-                .format(id+1,i+1,name,psnr_volume,psnr_slice,ssim_slice)
-            print(log)
-            with open(args.ckpt_dir + '/logs_test.txt',mode='a+') as f:
-                f.write(log+'\n')
-
-
             sr[..., gt_i : gt_i + args.hr_slice_patch] += tmp_sr
             sr_cnt[..., gt_i : gt_i + args.hr_slice_patch] += 1
 
@@ -151,7 +141,18 @@ def main():
             ssim = calc_ssim(gt[:, i, :], sr[:, i, :])
             y_z_ssim += ssim
         y_z_ssim /= i + 1
-        
+
+        psnr_slice = sum(psnr_slice) / max(len(psnr_slice), 1)
+        ssim_slice = sum(ssim_slice) / max(len(ssim_slice), 1)
+        psnr_volume = sum(psnr_volumes) / max(len(psnr_volumes), 1)
+        average_psnr_slice.append(psnr_slice)
+        average_ssim_slice.append(ssim_slice)
+        log = r"[{} / {}] NAME:{} psnr_volume:{} psnr_slice:{} ssim_slice:{}" \
+            .format(id + 1, dataloader.__len__(), name, psnr_volume, psnr_slice, ssim_slice)
+        print(log)
+        with open(args.ckpt_dir + '/logs_test.txt', mode='a+') as f:
+            f.write(log + '\n')
+
         log = r"[{} / {}] NAME:{} PSNR:{} x_y_ssim:{:.4f} x_z_ssim:{:.4f} y_z_ssim:{:.4f}".format(
             id + 1, dataloader.__len__(), name, psnr, x_y_ssim, x_z_ssim, y_z_ssim
         )

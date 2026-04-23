@@ -28,7 +28,7 @@ class I3Net(nn.Module):
         win_num_sqrt = args.win_num_sqrt
         window_size = args.image_size // args.win_num_sqrt
         self.head = nn.Sequential(
-            conv(in_slice + 2 * (len(self.time_list) * out_slice), n_feats, kernel_size),
+            conv(in_slice + 2 * out_slice, n_feats, kernel_size),
             nn.ReLU(),
             conv(n_feats, n_feats, kernel_size),
         )
@@ -92,13 +92,18 @@ class I3Net(nn.Module):
             img1 = self._vol_to_flowseek_rgb(img1)
 
             with torch.no_grad():
-                flow = self.flowseek(img0, img1, test_mode=True)["final"]
+                # flow = self.flowseek(img0, img1, test_mode=True)["final"]
+                flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
+                flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
+
             for j in range(1, self.args.upscale):
                 time = j / self.args.upscale
                 curr_idx = i * self.args.upscale + j
 
-                img0t = warp(img0, flow * time)
-                imgt1 = warp(img1, flow * (1 - time))
+                # img0t = warp(img0, flow * time)
+                # imgt1 = warp(img1, flow * (1 - time))
+                img0t = warp(img0, -flow01 * time)
+                imgt1 = warp(img1, -flow10 * (1 - time))
 
                 w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
@@ -155,7 +160,7 @@ if __name__ == "__main__":
     )
 
     args = parse_args(parser)
-    args.upscale = 2
+    args.upscale = 3
     args.n_feats = 64
     args.kernel_size = 3
     args.res_scale = 1
@@ -165,7 +170,7 @@ if __name__ == "__main__":
     args.head_num = 1
     args.win_num_sqrt = 16
     args.image_size = 256
-    args.lr_time_list = [0, 0.5, 1]
+    args.lr_time_list = [0, 0.3, 0.6, 1]
 
     gpy_id = 0
     model = I3Net(args).cuda(gpy_id)
