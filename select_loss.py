@@ -1,17 +1,6 @@
 import torch
 from torch import nn
-
-class Select_Loss(nn.Module):
-    def __init__(self,args):
-        super(Select_Loss,self).__init__()
-        self.args = args
-        self.l1loss  = nn.L1Loss()
-
-    def forward(self,sr,gt):
-        l1loss = self.l1loss(sr,gt)
-        loss = l1loss 
-        return loss
-
+import torch.nn.functional as F
 
 class SSIM(nn.Module):
     """Layer to compute the SSIM loss between a pair of images
@@ -56,3 +45,10 @@ def compute_reprojection_loss(pred, target):
     reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
 
     return reprojection_loss.mean()
+
+def compute_consistency_loss(pred_local, pred_global):
+    B, H, W, T = pred_local.shape
+
+    loss_cons = F.l1_loss(pred_local[..., T//2], pred_global[..., T//2])
+
+    return loss_cons

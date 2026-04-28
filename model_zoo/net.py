@@ -9,11 +9,11 @@ from .i3net.flow_module import warp
 # from i3net.flow_module import warp
 
 def make_model(args):
-    return I3Net(args)
+    return Net(args)
 
-class I3Net(nn.Module):
+class Net(nn.Module):
     def __init__(self, args=None, conv=default_conv):
-        super(I3Net, self).__init__()
+        super(Net, self).__init__()
         self.args = args
         n_feats = args.n_feats  # 64
         kernel_size = args.kernel_size  # 3
@@ -22,16 +22,22 @@ class I3Net(nn.Module):
         res_scale = args.res_scale  # 1
         in_slice = args.lr_slice_patch * 1
         out_slice = args.hr_slice_patch
-        self.time_list = args.lr_time_list[1:-1]
 
         head_num = args.head_num
         win_num_sqrt = args.win_num_sqrt
         window_size = args.image_size // args.win_num_sqrt
-        self.head = nn.Sequential(
-            conv(in_slice + 2 * out_slice, n_feats, kernel_size),
-            nn.ReLU(),
-            conv(n_feats, n_feats, kernel_size),
-        )
+        self.head = nn.ModuleDict({
+            'local': nn.Sequential(
+                conv(in_slice + 2 * out_slice, n_feats, kernel_size),
+                nn.ReLU(),
+                conv(n_feats, n_feats, kernel_size),
+            ),
+            'global': nn.Sequential(
+                conv(2 + 2 * out_slice, n_feats, kernel_size),
+                nn.ReLU(),
+                conv(n_feats, n_feats, kernel_size),
+            ),
+        })
         self.flowseek = FlowSeek(args)
 
         modules_body = [
@@ -73,7 +79,7 @@ class I3Net(nn.Module):
 
         return (rgb * 255.0).clamp(0.0, 255.0)
     
-    def _get_align(self, i_start, i_end):
+    def _get_flow(self, i_start, i_end):
         self.flowseek.eval()
         B, T, H, W = i_start.shape
 
@@ -92,7 +98,6 @@ class I3Net(nn.Module):
             img1 = self._vol_to_flowseek_rgb(img1)
 
             with torch.no_grad():
-                # flow = self.flowseek(img0, img1, test_mode=True)["final"]
                 flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
                 flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
 
@@ -100,27 +105,53 @@ class I3Net(nn.Module):
                 time = j / self.args.upscale
                 curr_idx = i * self.args.upscale + j
 
-                # img0t = warp(img0, flow * time)
-                # imgt1 = warp(img1, flow * (1 - time))
-                img0t = warp(img0, -flow01 * time)
+                imgt0 = warp(img0, -flow01 * time)
                 imgt1 = warp(img1, -flow10 * (1 - time))
 
-                w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
+                w0_seq[:, curr_idx, :, :] = torch.mean(imgt0, 1) / 255.0
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
 
         return w0_seq, w1_seq
 
-    def forward(self, x):
-        x = x.permute(0, 3, 1, 2).contiguous()
-        i_start = x[:, :-1, :, :]
-        i_end = x[:, 1:, :, :]
+    def _get_global_flow(self, i_start, i_end):
+        self.flowseek.eval()
+
+        warped0_list = []
+        warped1_list = []
+
+        warped0_list.append(i_start)
+        warped1_list.append(i_start)
+
+        img0 = self._vol_to_flowseek_rgb(i_start)
+        img1 = self._vol_to_flowseek_rgb(i_end)
+
+        with torch.no_grad():
+            flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
+            flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
+
+        times = self.args.hr_slice_patch - 1
+
+        for j in range(1, times):
+            t = j / times
+
+            imgt0 = warp(img0, -flow01 * t)
+            imgt1 = warp(img1, -flow10 * (1 - t))
+
+            warped0_list.append(torch.mean(imgt0, 1) / 255.0)
+            warped1_list.append(torch.mean(imgt1, 1) / 255.0)
         
-        # B, T, H, W = x.shape
-        warped0, warped1 = self._get_align(i_start, i_end)
+        warped0_list.append(i_end)
+        warped1_list.append(i_end)
 
-        align_input = torch.cat([x, warped0, warped1], 1)
-        x_head = self.head(align_input)
+        # shape: [B, times+2, H, W]
+        warped0 = torch.stack(warped0_list, dim=1)
+        warped1 = torch.stack(warped1_list, dim=1)
 
+        return warped0, warped1
+    
+    def _refine(self, x, warped0, warped1, branch='local'):
+        x = torch.cat([x, warped0, warped1], 1)
+        x_head = self.head[branch](x)
         res = x_head
 
         align_list = []
@@ -132,22 +163,47 @@ class I3Net(nn.Module):
             if id in [3, 7]:
                 res = self.alignment[id // 4 + 1](res) + res
                 align_list.append(res)
-
+        
         res = self.fuse_align(torch.cat(align_list, 1))
-
         res += x_head
 
         raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
-
         mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
         delta = raw_output[:, self.args.hr_slice_patch :, :, :]
 
         out = mask * warped0 + (1 - mask) * warped1 + delta
 
-        out[:, :: self.args.upscale] = x
-        out = out.permute(0, 2, 3, 1).contiguous()
-
         return out
+    
+    def model_local(self, x):
+        i_start = x[:, :-1, :, :]
+        i_end = x[:, 1:, :, :]
+        warped0, warped1 = self._get_flow(i_start, i_end)
+        return warped0, warped1
+    
+    def model_global(self, x):
+        i_start = x[:, 0, :, :]
+        i_end = x[:, -1, :, :]
+        warped0, warped1 = self._get_global_flow(i_start, i_end)
+        return warped0, warped1
+
+    def forward(self, x):
+        x = x.permute(0, 3, 1, 2).contiguous()
+        warped0_local, warped1_local = self.model_local(x)
+        warped0_global, warped1_global = self.model_global(x)
+
+        out_local = self._refine(x, warped0_local, warped1_local, branch='local')
+        x_global = torch.cat([x[:, 0:1, :, :], x[:, -1:, :, :]], 1)
+        out_global = self._refine(x_global, warped0_global, warped1_global, branch='global')
+
+        out_local[:, :: self.args.upscale] = x
+        out_global[:, 0, :, :] = x[:, 0, :, :]
+        out_global[:, -1, :, :] = x[:, -1, :, :]
+
+        out_local = out_local.permute(0, 2, 3, 1).contiguous()
+        out_global = out_global.permute(0, 2, 3, 1).contiguous()
+
+        return out_local, out_global
 
 
 if __name__ == "__main__":
@@ -165,16 +221,16 @@ if __name__ == "__main__":
     args.kernel_size = 3
     args.res_scale = 1
     args.i_num_blocks = 16
-    args.lr_slice_patch = 4
+    args.lr_slice_patch = 6
     args.hr_slice_patch = (args.lr_slice_patch - 1) * args.upscale + 1
     args.head_num = 1
     args.win_num_sqrt = 16
     args.image_size = 256
-    args.lr_time_list = [0, 0.3, 0.6, 1]
 
     gpy_id = 0
-    model = I3Net(args).cuda(gpy_id)
+    model = Net(args).cuda(gpy_id)
     x = torch.ones(1, args.image_size, args.image_size, args.lr_slice_patch).cuda(gpy_id)
     y = torch.ones(1, args.image_size, args.image_size, args.hr_slice_patch).cuda(gpy_id)
-    pred = model(x)
-    print(pred.shape)
+    out_local, out_global = model(x)
+    print(out_local.shape)
+    print(out_global.shape)
