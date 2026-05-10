@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# from .i3net.basic_model import default_conv
-# from .i3net.frequency_aware import FrequencyAwareGroup
-# from .i3net.motion_aware import MotionAwareGroup
+from .i3net.basic_model import default_conv
+from .i3net.frequency_aware import FrequencyAwareGroup
+from .i3net.motion_aware import MotionAwareGroup
 
-from i3net.basic_model import default_conv
-from i3net.frequency_aware import FrequencyAwareGroup
-from i3net.motion_aware import MotionAwareGroup
+# from i3net.basic_model import default_conv
+# from i3net.frequency_aware import FrequencyAwareGroup
+# from i3net.motion_aware import MotionAwareGroup
 
 def make_model(args):
     return Net(args)
@@ -38,7 +38,7 @@ class Net(nn.Module):
         )
 
         self.fuse = nn.Sequential(
-            nn.Conv2d(n_feats * 3, n_feats, 1),
+            nn.Conv2d(n_feats * 2, n_feats, 1),
             nn.GELU(),
             nn.Conv2d(n_feats, n_feats, 3, 1, 1),
             nn.GELU(),
@@ -62,8 +62,8 @@ class Net(nn.Module):
         motion = F.interpolate(motion, size=(Hf, Wf), mode="bilinear", align_corners=False)
 
         gate = self.motion_gate(motion)
-        fused = motion * gate + frequency * (1 - gate)
-        fused = self.fuse(torch.cat([frequency, motion, fused], dim=1))
+        motion = motion * gate
+        fused = self.fuse(torch.cat([frequency, motion], dim=1))
         out = self.tail(fused)
 
         out[:, :: self.args.upscale] = x

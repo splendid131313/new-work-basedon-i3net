@@ -160,21 +160,51 @@ class MotionAwareBlock(nn.Module):
     def __init__(self, n_feats, head_num=1, lambda_flow=10.0, window_size=16, n_depth=2):
         super().__init__()
 
+        self.alpha = 0.1
+
         body = [MotionAware(dim=n_feats, num_heads=head_num, lambda_flow=lambda_flow, window_size=window_size, shift_size=0) for _ in range(n_depth)]
         self.body = nn.ModuleList(body)
 
         body_shifted = [MotionAware(dim=n_feats, num_heads=head_num, lambda_flow=lambda_flow, window_size=window_size, shift_size=window_size // 2) for _ in range(n_depth)]
         self.body_shifted = nn.ModuleList(body_shifted)
+
+        self.mask_net = nn.Sequential(
+            nn.Conv2d(2 + 2 * n_feats, n_feats, 3, 1, 1),
+            nn.GELU(),
+            nn.Conv2d(n_feats, 1, 3, 1, 1),
+            nn.Sigmoid(),
+        )
+
+        self.fuse = nn.Sequential(
+            nn.Conv2d(n_feats * 2, n_feats, 1),
+            nn.GELU(),
+            nn.Conv2d(n_feats, n_feats, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(n_feats, n_feats, 3, padding=1),
+        )
     
     def forward(self, f1, f2, flow):
-        res = self.body[0](f1, f2, flow)
-        res = self.body_shifted[0](res, f2, flow)
+        f2_warp = warp(f2, flow)
 
-        for layer, layer_shifted in zip(self.body[1:], self.body_shifted[1:]):
-            res = layer(res, f2, flow)
-            res = layer_shifted(res, f2, flow)
+        base = self.fuse(torch.cat([f1, f2_warp], dim=1))
+        feat = base
+        res = 0
+        for layer, layer_shifted in zip(self.body, self.body_shifted):
+            delta = layer(feat, f2_warp, flow)
+            feat = feat + delta
+            res = res + delta
 
-        return res
+            delta = layer_shifted(feat, f2_warp, flow)
+            feat = feat + delta
+            res = res + delta
+        
+        residual = res
+
+        mask = self.mask_net(torch.cat([flow, f1, f2_warp], dim=1))
+
+        mask = torch.clamp(mask, 0.0, 1.0)
+        out = base + residual * mask
+        return out
 
 class MotionAwareGroup(nn.Module):
     def __init__(self, args, n_feats, kernel_size, head_num=1, lambda_flow=10.0, window_size=16, num_blocks=16, n_depth=2):

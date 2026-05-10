@@ -112,8 +112,7 @@ class FrequencyAwareBlock(nn.Module):
         res = self.body[0](x)
         res = res + x
         for layer in self.body[1:]:
-            res = layer(res)
-            res = res + x
+            res = res + layer(res)
 
         return res
 
