@@ -38,7 +38,7 @@ class Net(nn.Module):
         )
 
         self.fuse = nn.Sequential(
-            nn.Conv2d(n_feats * 4, n_feats, 1),
+            nn.Conv2d(n_feats * 3, n_feats, 1),
             nn.GELU(),
             nn.Conv2d(n_feats, n_feats, 3, 1, 1),
             nn.GELU(),
@@ -59,19 +59,11 @@ class Net(nn.Module):
         Hf, Wf = frequency.shape[-2:]
 
         motion = self.motion(x)
-        frequency = frequency.permute(1, 0, 2, 3, 4)
-        motion = motion.permute(1, 0, 2, 3, 4)
-        
-        fused = []
+        motion = F.interpolate(motion, size=(Hf, Wf), mode="bilinear", align_corners=False)
 
-        for cf, cm in zip(frequency, motion):
-            cm = F.interpolate(cm, size=(Hf, Wf), mode="bilinear", align_corners=False)
-            gate = self.motion_gate(cf)
-            cm = cm * gate + cm
-            fused.append(cm)
-            
-        fused = torch.cat(fused, dim=1)
-        fused = self.fuse(fused)
+        gate = self.motion_gate(motion)
+        fused = motion * gate + frequency * (1 - gate)
+        fused = self.fuse(torch.cat([frequency, motion, fused], dim=1))
         out = self.tail(fused)
 
         out[:, :: self.args.upscale] = x
@@ -101,6 +93,10 @@ if __name__ == "__main__":
     args.win_num_sqrt = 16
     args.image_size = 256
     args.lambda_flow = 10.0
+    args.finetune_flowseek = True
+    args.flowseek_forward_iters = 6
+    args.flowseek_finetune_scope = "minimal"
+    args.flow_lr_ratio = 0.1
 
     gpy_id = 0
     model = Net(args).cuda(gpy_id)

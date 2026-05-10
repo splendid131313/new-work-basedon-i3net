@@ -202,18 +202,30 @@ class MotionAwareGroup(nn.Module):
         return (rgb * 255.0).clamp(0.0, 255.0)
     
     def _get_flow(self, i_start, i_end):
-        self.flowseek.eval()
+        finetune = getattr(self.args, "finetune_flowseek", False)
+        if self.training and finetune:
+            self.flowseek.train()
+            self.flowseek.dav2.eval()
+        else:
+            self.flowseek.eval()
+
         B, T, H, W = i_start.shape
 
         flows = []
+        grad_enabled = self.training and finetune
         for i in range(T):
             img0 = i_start[:, i, :, :]
             img1 = i_end[:, i, :, :]
             img0 = self._vol_to_flowseek_rgb(img0)
             img1 = self._vol_to_flowseek_rgb(img1)
 
-            with torch.no_grad():
-                flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
+            forward_iters = getattr(self.args, "flowseek_forward_iters", 0)
+            call_kw = {"test_mode": True}
+            if forward_iters and forward_iters > 0:
+                call_kw["iters"] = int(forward_iters)
+
+            with torch.set_grad_enabled(grad_enabled):
+                flow01 = self.flowseek(img0, img1, **call_kw)["final"]
                 flows.append(flow01)
 
         flows = torch.cat(flows, dim=1)
@@ -235,9 +247,7 @@ class MotionAwareGroup(nn.Module):
         feats = feats.view(B, T, C, Hf, Wf)
 
         outs = []
-        collect = []
         for i in range(T-1):
-            col = []
             flow = flows[:, i*2:i*2+2]
             flow = F.interpolate(flow, size=(Hf,Wf), mode='bilinear')
             flow = flow / (H / Hf)
@@ -246,17 +256,10 @@ class MotionAwareGroup(nn.Module):
             res = f1
             for id, motion_block in enumerate(self.motion):
                 res = motion_block(res, f2, flow)
-                if id in [1, 3, 5]:
-                    col.append(res)
             outs.append(res)
-            col = torch.stack(col, dim=1)
-            col = self.temporal_fuse(col.permute(0,2,1,3,4))
-            collect.append(col.mean(2))
         
         outs = torch.stack(outs, dim=1)
         outs = outs.permute(0,2,1,3,4)  # B,C,T,H,W
 
         motion_feat = self.temporal_fuse(outs)
-        collect.append(motion_feat.mean(2))
-        collect = torch.stack(collect, dim=1)
-        return collect
+        return motion_feat.mean(2)

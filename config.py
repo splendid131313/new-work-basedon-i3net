@@ -29,6 +29,31 @@ model_arg.add_argument("--resume", type=bool, default=False, help='run resume or
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
 model_arg.add_argument("--flow_cfg", type=str, default="flowseek-S.json")
 model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/weights/flowseek_T_CT.pth")
+model_arg.add_argument(
+    "--finetune_flowseek",
+    type=str2bool,
+    default=True   ,
+    help="若为 True：不冻结 FlowSeek 权重，训练时反传光流分支（DepthAnything 仍冻结）",
+)
+model_arg.add_argument(
+    "--flow_lr_ratio",
+    type=float,
+    default=0.1,
+    help="finetune_flowseek 为 True 时，FlowSeek 可训练参数相对主 lr 的倍数（通常更小以稳定）",
+)
+model_arg.add_argument(
+    "--flowseek_finetune_scope",
+    type=str,
+    default="minimal",
+    choices=("full", "refine", "minimal"),
+    help="full=除 DepthAnything 外全微调；refine=仅细化头(init_conv/flow_head/upsample_weight/update_block)，冻结 cnet/bnet/fnet/merge_head；minimal=仅 update_block+双头",
+)
+model_arg.add_argument(
+    "--flowseek_forward_iters",
+    type=int,
+    default=6,
+    help="覆盖 FlowSeek 细化迭代次数；0 表示使用 flow 配置里的 iters（如 flowseek-S 为 12）。减算量建议 4（约为原迭代 1/3，通常仍够用）",
+)
 
 
 # Training / test parameters

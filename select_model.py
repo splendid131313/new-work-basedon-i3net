@@ -19,6 +19,48 @@ def load_flowseek_ckpt(args):
         state = {k.replace("module.", ""): v for k, v in state.items()}
     return state
 
+
+def apply_flowseek_requires_grad(flowseek, args):
+    finetune = getattr(args, "finetune_flowseek", False)
+    if not finetune:
+        for p in flowseek.parameters():
+            p.requires_grad = False
+        return
+
+    scope = getattr(args, "flowseek_finetune_scope", "refine")
+
+    if scope == "full":
+        for p in flowseek.parameters():
+            p.requires_grad = True
+        for p in flowseek.dav2.parameters():
+            p.requires_grad = False
+        return
+
+    for p in flowseek.parameters():
+        p.requires_grad = False
+
+    def _unfreeze(module):
+        if module is None:
+            return
+        for p in module.parameters():
+            p.requires_grad = True
+
+    if scope == "minimal":
+        _unfreeze(flowseek.upsample_weight)
+        _unfreeze(flowseek.flow_head)
+        _unfreeze(getattr(flowseek, "update_block", None))
+        return
+
+    if scope == "refine":
+        _unfreeze(flowseek.init_conv)
+        _unfreeze(flowseek.upsample_weight)
+        _unfreeze(flowseek.flow_head)
+        _unfreeze(getattr(flowseek, "update_block", None))
+        return
+
+    raise ValueError(f"unknown flowseek_finetune_scope: {scope}")
+
+
 def args_add_additional_attr(args,json_path):
     dic = json.load(open(json_path,'r',))
     for key,value in dic.items():
@@ -40,9 +82,18 @@ def select_model(args):
     )
     if len(missing_keys) > 0:
         print(f"Warning: Missing keys: {missing_keys}")
-    for param in model.motion.flowseek.parameters():
-        param.requires_grad = False
-    print("load flowseek weight success")
+    apply_flowseek_requires_grad(model.motion.flowseek, args)
+    finetune = getattr(args, "finetune_flowseek", False)
+    sc = getattr(args, "flowseek_finetune_scope", "refine")
+    if not finetune:
+        print("load flowseek weight success (frozen)")
+    else:
+        n_train = sum(p.numel() for p in model.motion.flowseek.parameters() if p.requires_grad)
+        n_tot = sum(p.numel() for p in model.motion.flowseek.parameters())
+        print(
+            f"load flowseek weight success (finetune scope={sc}, "
+            f"trainable params {n_train / 1e6:.2f}M / {n_tot / 1e6:.2f}M)"
+        )
     return model
 
 
