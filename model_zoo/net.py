@@ -38,7 +38,7 @@ class Net(nn.Module):
         )
 
         self.fuse = nn.Sequential(
-            nn.Conv2d(n_feats * 2, n_feats, 1),
+            nn.Conv2d(n_feats * 4, n_feats, 1),
             nn.GELU(),
             nn.Conv2d(n_feats, n_feats, 3, 1, 1),
             nn.GELU(),
@@ -59,13 +59,18 @@ class Net(nn.Module):
         Hf, Wf = frequency.shape[-2:]
 
         motion = self.motion(x)
-        motion_feat = F.interpolate(
-            motion, size=(Hf, Wf), mode="bilinear", align_corners=False
-        )
+        frequency = frequency.permute(1, 0, 2, 3, 4)
+        motion = motion.permute(1, 0, 2, 3, 4)
+        
+        fused = []
 
-        gate = self.motion_gate(motion_feat)
-        motion_feat = motion_feat * gate + motion_feat
-        fused = torch.cat([frequency, motion_feat], dim=1)
+        for cf, cm in zip(frequency, motion):
+            cm = F.interpolate(cm, size=(Hf, Wf), mode="bilinear", align_corners=False)
+            gate = self.motion_gate(cf)
+            cm = cm * gate + cm
+            fused.append(cm)
+            
+        fused = torch.cat(fused, dim=1)
         fused = self.fuse(fused)
         out = self.tail(fused)
 

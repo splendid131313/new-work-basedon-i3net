@@ -145,6 +145,7 @@ class FrequencyAwareGroup(nn.Module):
         x_head = self.head(x)
         res = x_head
         align_list = []
+        collect = []
         res = self.alignment[0](res) + res
         align_list.append(res)
         for id, layer in enumerate(self.frequency):
@@ -152,8 +153,12 @@ class FrequencyAwareGroup(nn.Module):
             if id in [3, 7]:
                 res = self.alignment[id // 4 + 1](res) + res
                 align_list.append(res)
+            if id in [1, 4, 7]:
+                collect.append(res)
 
         res = torch.cat(align_list, 1)
         res = self.fuse_align(torch.cat(align_list, 1))
         res = res + x_head
-        return res
+        collect.append(res)
+        collect = torch.stack(collect, dim=1)
+        return collect

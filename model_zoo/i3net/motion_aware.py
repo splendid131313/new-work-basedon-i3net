@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import math
-from ..flowseek.core.flowseek import FlowSeek
+from flowseek.core.flowseek import FlowSeek
 from .basic_model import window_partitions, window_reverses, FeatureExtractor
 
 def _pad_spatial(x, window_size):
@@ -185,7 +185,7 @@ class MotionAwareGroup(nn.Module):
         self.flowseek = FlowSeek(args)
         motion = [
             MotionAwareBlock(n_feats=n_feats, head_num=head_num,
-            lambda_flow=lambda_flow, window_size=window_size, n_depth=n_depth) for _ in range(num_blocks // 4)]
+            lambda_flow=lambda_flow, window_size=window_size, n_depth=n_depth) for _ in range(num_blocks // 2 - 2)]
         self.motion = nn.ModuleList(motion)
 
         self.temporal_fuse = nn.Sequential(
@@ -235,20 +235,28 @@ class MotionAwareGroup(nn.Module):
         feats = feats.view(B, T, C, Hf, Wf)
 
         outs = []
+        collect = []
         for i in range(T-1):
+            col = []
             flow = flows[:, i*2:i*2+2]
             flow = F.interpolate(flow, size=(Hf,Wf), mode='bilinear')
             flow = flow / (H / Hf)
             f1 = feats[:, i, :, :]
             f2 = feats[:, i+1, :, :]
             res = f1
-            for motion_block in self.motion:
+            for id, motion_block in enumerate(self.motion):
                 res = motion_block(res, f2, flow)
+                if id in [1, 3, 5]:
+                    col.append(res)
             outs.append(res)
+            col = torch.stack(col, dim=1)
+            col = self.temporal_fuse(col.permute(0,2,1,3,4))
+            collect.append(col.mean(2))
         
         outs = torch.stack(outs, dim=1)
         outs = outs.permute(0,2,1,3,4)  # B,C,T,H,W
 
         motion_feat = self.temporal_fuse(outs)
-        motion_feat = motion_feat.mean(2)
-        return motion_feat
+        collect.append(motion_feat.mean(2))
+        collect = torch.stack(collect, dim=1)
+        return collect
