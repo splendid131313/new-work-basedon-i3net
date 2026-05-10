@@ -2,6 +2,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+def get_lambda(epoch, max_epoch):
+    return 0.1 * (1 - epoch / max_epoch)
+
 class SSIM(nn.Module):
     """Layer to compute the SSIM loss between a pair of images
     """
@@ -45,10 +48,3 @@ def compute_reprojection_loss(pred, target):
     reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
 
     return reprojection_loss.mean()
-
-def compute_consistency_loss(pred_local, pred_global):
-    B, H, W, T = pred_local.shape
-
-    loss_cons = F.l1_loss(pred_local[..., T//2], pred_global[..., T//2])
-
-    return loss_cons

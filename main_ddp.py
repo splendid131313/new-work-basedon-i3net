@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import compute_reprojection_loss, compute_consistency_loss
+from select_loss import compute_reprojection_loss
 
 
 def main():
@@ -86,12 +86,12 @@ def main():
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
     loss_reproj = compute_reprojection_loss
-    loss_cons = compute_consistency_loss
+
 
     # if is_main:
     #     wandb.init(
-    #         project="i3net",
-    #         name="flow_module",
+    #         project="My-TwoBranches",
+    #         name="origin",
     #         config=args.__dict__,
     #     )
 
@@ -108,11 +108,9 @@ def main():
     for epoch in range(args.start_epoch, args.max_epoch):
         train_sampler.set_epoch(epoch)
 
-        loss_epoch = 0
-        psnr_local_epoch = 0
-        psnr_global_epoch = 0
-        psnr_pred_local_epoch = 0
-        psnr_pred_global_epoch = 0
+        loss_iter_epoch = 0
+        psnr_epoch = 0
+        psnr_pred_epoch = 0
 
         if is_main:
             loader_iter = tqdm(enumerate(dataloader), total=len(dataloader))
@@ -134,75 +132,61 @@ def main():
 
             if use_amp:
                 with autocast():
-                    out_local, out_global = model(lr)
-                    loss_iter = loss_reproj(out_local, gt) + loss_reproj(out_global, gt) + loss_cons(out_local, out_global)
+                    pred = model(lr)
+                    loss_iter = loss_reproj(pred, gt)
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                out_local, out_global = model(lr)
-                loss_iter = loss_reproj(out_local, gt) + loss_reproj(out_global, gt) + loss_cons(out_local, out_global)
+                pred = model(lr)
+                loss_iter = loss_reproj(pred, gt)
                 loss = loss_iter
                 loss.backward()
                 optimizer.step()
 
             with torch.no_grad():
-                psnr_local_iter = 0.0
-                psnr_global_iter = 0.0
-                psnr_pred_local_iter = 0.0
-                psnr_pred_global_iter = 0.0
+                psnr_iter = 0.0
+                psnr_pred_iter = 0.0
                 for bz in range(gt.shape[0]):
-                    psnr_local_iter += calc_psnr(gt[bz, :, :, :], out_local[bz, :, :, :]).item()
-                    psnr_global_iter += calc_psnr(gt[bz, :, :, :], out_global[bz, :, :, :]).item()
-                    psnr_pred_local_iter += calc_psnr(
-                        gt[bz, :, :, 1 :: args.upscale],
-                        out_local[bz, :, :, 1 :: args.upscale],
+                    psnr_iter += calc_psnr(gt[bz, :, :, :], pred[bz, :, :, :]).item()
+                    # TODO:
+                    # upscale > 2的时候，这里的索引是不合理的
+                    psnr_pred_iter += calc_psnr(
+                        gt[bz, :, :, 1 :: args.upscale], pred[bz, :, :, 1 :: args.upscale]
                     ).item()
-                    psnr_pred_global_iter += calc_psnr(
-                        gt[bz, :, :, 1 :: args.upscale],
-                        out_global[bz, :, :, 1 :: args.upscale],
-                    ).item()
-                psnr_local_iter /= gt.shape[0]
-                psnr_global_iter /= gt.shape[0]
-                psnr_pred_local_iter /= gt.shape[0]
-                psnr_pred_global_iter /= gt.shape[0]
+                psnr_iter /= gt.shape[0]
+                psnr_pred_iter /= gt.shape[0]
 
-            loss_epoch += loss_iter.detach().item()
-            psnr_local_epoch += psnr_local_iter
-            psnr_global_epoch += psnr_global_iter
-            psnr_pred_local_epoch += psnr_pred_local_iter
-            psnr_pred_global_epoch += psnr_pred_global_iter
+            loss_iter_epoch += loss_iter.detach().item()
+            psnr_epoch += psnr_iter
+            psnr_pred_epoch += psnr_pred_iter
+
 
             if is_main:
                 lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
                 log = (
                     f"epoch[{epoch + 1}/{args.max_epoch}] "
                     f"iter[{iter + 1}/{len(dataloader)}] "
-                    f"psnrTrLocal:{psnr_local_iter:.6f} psnrTrGlobal:{psnr_global_iter:.6f} psnrPredLocal:{psnr_pred_local_iter:.6f} psnrPredGlobal:{psnr_pred_global_iter:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+                    f"psnrVolume:{psnr_iter:.6f} psnrSlice:{psnr_pred_iter:.6f} lossTr:{loss_iter:.12f} lr:{lr_tmp:.12f}"
                 )
                 now = str(datetime.datetime.now())
                 print(now + " " + log)
 
-        loss_tensor = torch.tensor(loss_epoch, device=device)
-        psnr_local_tensor = torch.tensor(psnr_local_epoch, device=device)
-        psnr_global_tensor = torch.tensor(psnr_global_epoch, device=device)
-        psnr_pred_local_tensor = torch.tensor(psnr_pred_local_epoch, device=device)
-        psnr_pred_global_tensor = torch.tensor(psnr_pred_global_epoch, device=device)
+        loss_iter_tensor = torch.tensor(loss_iter_epoch, device=device)
+        psnr_tensor = torch.tensor(psnr_epoch, device=device)
+        psnr_pred_tensor = torch.tensor(psnr_pred_epoch, device=device)
         count_tensor = torch.tensor(len(dataloader), device=device, dtype=torch.float32)
 
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_local_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_global_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_pred_local_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_pred_global_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(loss_iter_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(psnr_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(psnr_pred_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
 
-        loss_epoch = (loss_tensor / count_tensor).item()
-        psnr_local_epoch = (psnr_local_tensor / count_tensor).item()
-        psnr_global_epoch = (psnr_global_tensor / count_tensor).item()
-        psnr_pred_local_epoch = (psnr_pred_local_tensor / count_tensor).item()
-        psnr_pred_global_epoch = (psnr_pred_global_tensor / count_tensor).item()
+        loss_iter_epoch = (loss_iter_tensor / count_tensor).item()
+        loss_epoch = loss_iter_epoch
+        psnr_epoch = (psnr_tensor / count_tensor).item()
+        psnr_pred_epoch = (psnr_pred_tensor / count_tensor).item()
 
         if args.schedule == "step":
             scheduler.step()
@@ -211,41 +195,34 @@ def main():
         elif args.schedule == "Tmin":
             scheduler.step(loss_epoch)
         elif args.schedule == "Tmax":
-            scheduler.step(psnr_local_epoch)
+            scheduler.step(psnr_epoch)
 
         if is_main:
             lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
 
-            with torch.no_grad():
-                b, h, w, s = gt.shape
-                mid_s = s // 2
-                out_local = torch.clamp(out_local, 0, 1)
-                out_global = torch.clamp(out_global, 0, 1)
-                gt = torch.clamp(gt, 0, 1)
-                out_local_mid = out_local[0, :, :, mid_s].detach().cpu().float().numpy()
-                out_global_mid = (
-                    out_global[0, :, :, mid_s].detach().cpu().float().numpy()
-                )
-                gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
+            # with torch.no_grad():
+            #     b, h, w, s = gt.shape
+            #     mid_s = s // 2
+            #     pred = torch.clamp(pred, 0, 1)
+            #     gt = torch.clamp(gt, 0, 1)
+            #     pred_mid = pred[0, :, :, mid_s].detach().cpu().float().numpy()
+            #     gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
 
-                wandb.log(
-                    {
-                        "train/psnr_local_epoch": psnr_local_epoch,
-                        "train/psnr_global_epoch": psnr_global_epoch,
-                        "train/psnr_pred_local_epoch": psnr_pred_local_epoch,
-                        "train/psnr_pred_global_epoch": psnr_pred_global_epoch,
-                        "train/loss_epoch": loss_epoch,
-                        "train/lr": lr_tmp,
-                        "epoch": epoch,
-                        "vis/out_local": wandb.Image(out_local_mid, caption="Local pred"),
-                        "vis/out_global": wandb.Image(out_global_mid, caption="Global pred"),
-                        "vis/gt": wandb.Image(gt_mid, caption="GT"),
-                    }
-                )
+            #     wandb.log(
+            #         {
+            #             "train/psnr_epoch": psnr_epoch,
+            #             "train/psnr_pred_epoch": psnr_pred_epoch,
+            #             "train/loss_epoch": loss_epoch,
+            #             "train/lr": lr_tmp,
+            #             "epoch": epoch,
+            #             "vis/pred": wandb.Image(pred_mid, caption="Pred"),
+            #             "vis/gt": wandb.Image(gt_mid, caption="GT"),
+            #         }
+            #     )
 
             log = (
                 f"epoch[{epoch + 1}/{args.max_epoch}] "
-                f"psnrTrLocal:{psnr_local_epoch:.6f} psnrTrGlobal:{psnr_global_epoch:.6f} psnrPredLocal:{psnr_pred_local_epoch:.6f} psnrPredGlobal:{psnr_pred_global_epoch:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+                f"psnrVolume:{psnr_epoch:.6f} psnrSlice:{psnr_pred_epoch:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
             )
             now = str(datetime.datetime.now())
             print(now + " " + log)

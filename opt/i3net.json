@@ -7,5 +7,6 @@
     "head_num": 1,
     "i_num_blocks": 16,
 
-    "win_num_sqrt":16
+    "win_num_sqrt":16,
+    "lambda_flow": 50.0
 }
