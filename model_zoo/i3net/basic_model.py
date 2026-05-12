@@ -1,5 +1,9 @@
+import contextlib
+
 import torch.nn as nn
+import torch
 import einops
+import torch.distributions as td
 from functools import partial
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
@@ -93,6 +97,27 @@ class GDFN(nn.Module):
 
 
 #####################################################################
+class SliceAttentionModule(nn.Module):
+    def __init__(self, in_features, n_feats=64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, n_feats),
+            nn.ReLU(),
+            nn.Linear(n_feats, in_features)
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        avg = torch.mean(x, dim=(2,3))      # (B, C)
+        maxv = torch.amax(x, dim=(2,3))     # (B, C)
+
+        att = self.mlp(avg) + self.mlp(maxv)
+
+        att = torch.sigmoid(att).view(B, C, 1, 1)
+
+        return x * att
+
 class IntraSliceBranch(nn.Module):
     def __init__(self,conv=nn.Conv2d,n_feat=64,kernel_size=3,bias=True,
                  head_num=1, win_num_sqrt=16, window_size=16):
@@ -142,8 +167,8 @@ class IntraSliceBranch(nn.Module):
 
 class I2Block(nn.Module):
     def __init__(
-        self, conv, n_feat, kernel_size,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
+            self, conv, n_feat, kernel_size,
+            bias=True, bn=False, act=nn.ReLU(True), res_scale=1, head_num=1, win_num_sqrt=16, window_size=16):
         super(I2Block, self).__init__()
         inter_slice_branch = [
             nn.PixelUnshuffle(2),
@@ -173,7 +198,7 @@ class I2Group(nn.Module):
         super().__init__()
 
         body = [I2Block(conv, n_feat, kernel_size,
-                            bias, bn, act, res_scale,head_num,win_num_sqrt, window_size) for _ in range(n_depth)]
+                        bias, bn, act, res_scale, head_num, win_num_sqrt, window_size) for _ in range(n_depth)]
 
         self.body = nn.ModuleList(body)
     def forward(self,x):

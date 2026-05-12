@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, I2Group, CrossViewBlock
-from .flowseek.core.flowseek import FlowSeek
-from .i3net.flow_module import warp
+# from .i3net.basic_model import default_conv, I2Group, CrossViewBlock, SliceAttentionModule
+# from .flowseek.core.flowseek import FlowSeek
+# from .i3net.flow_module import warp
 
-# from i3net.basic_model import default_conv, I2Group, CrossViewBlock
-# from flowseek.core.flowseek import FlowSeek
-# from i3net.flow_module import warp
+from i3net.basic_model import default_conv, I2Group, CrossViewBlock, SliceAttentionModule
+from flowseek.core.flowseek import FlowSeek
+from i3net.flow_module import warp
 
 def make_model(args):
     return I3Net(args)
@@ -22,6 +22,7 @@ class I3Net(nn.Module):
         res_scale = args.res_scale  # 1
         in_slice = args.lr_slice_patch * 1
         out_slice = args.hr_slice_patch
+        batch_size = args.batch_size
         self.time_list = args.lr_time_list[1:-1]
 
         head_num = args.head_num
@@ -33,6 +34,8 @@ class I3Net(nn.Module):
             conv(n_feats, n_feats, kernel_size),
         )
         self.flowseek = FlowSeek(args)
+
+        self.slice_attn = SliceAttentionModule(out_slice, n_feats)
 
         modules_body = [
             I2Group(
@@ -117,10 +120,14 @@ class I3Net(nn.Module):
         
         # B, T, H, W = x.shape
         warped0, warped1 = self._get_align(i_start, i_end)
+        B, T, H, W = warped0.shape
+
+        warped0 = self.slice_attn(warped0)
+        warped1 = self.slice_attn(warped1)
 
         align_input = torch.cat([x, warped0, warped1], 1)
-        x_head = self.head(align_input)
 
+        x_head = self.head(align_input)
         res = x_head
 
         align_list = []
@@ -160,7 +167,7 @@ if __name__ == "__main__":
     )
 
     args = parse_args(parser)
-    args.upscale = 3
+    args.upscale = 2
     args.n_feats = 64
     args.kernel_size = 3
     args.res_scale = 1
@@ -170,11 +177,12 @@ if __name__ == "__main__":
     args.head_num = 1
     args.win_num_sqrt = 16
     args.image_size = 256
-    args.lr_time_list = [0, 0.3, 0.6, 1]
+    args.lr_time_list = [0, 0.5, 1]
+    args.batch_size = 1
 
     gpy_id = 0
     model = I3Net(args).cuda(gpy_id)
-    x = torch.ones(1, args.image_size, args.image_size, args.lr_slice_patch).cuda(gpy_id)
-    y = torch.ones(1, args.image_size, args.image_size, args.hr_slice_patch).cuda(gpy_id)
+    x = torch.ones(args.batch_size, args.image_size, args.image_size, args.lr_slice_patch).cuda(gpy_id)
+    y = torch.ones(args.batch_size, args.image_size, args.image_size, args.hr_slice_patch).cuda(gpy_id)
     pred = model(x)
     print(pred.shape)

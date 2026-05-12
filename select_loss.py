@@ -53,6 +53,6 @@ def compute_reprojection_loss(pred, target):
 
     ssim = SSIM().to(pred.device, pred.dtype)
     ssim_loss = ssim(pred, target).mean(1, True)
-    reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
+    reprojection_loss = 0.30 * ssim_loss + 0.70 * l1_loss
 
     return reprojection_loss.mean()
