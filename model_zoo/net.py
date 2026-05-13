@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, I2Group, CrossViewBlock
+from .i3net.basic_model import default_conv, CrossViewBlock
+from .i3net.pfg import MidPFG, Encoder, Decoder
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
 
-# from i3net.basic_model import default_conv, I2Group, CrossViewBlock
+# from i3net.basic_model import default_conv, CrossViewBlock
+# from i3net.pfg import MidPFG, Encoder, Decoder
 # from flowseek.core.flowseek import FlowSeek
 # from i3net.flow_module import warp
 
@@ -24,47 +26,23 @@ class I3Net(nn.Module):
         out_slice = args.hr_slice_patch
         self.time_list = args.lr_time_list[1:-1]
 
-        head_num = args.head_num
-        win_num_sqrt = args.win_num_sqrt
-        window_size = args.image_size // args.win_num_sqrt
-        self.head = nn.Sequential(
-            conv(in_slice + 2 * out_slice, n_feats, kernel_size),
-            nn.ReLU(),
-            conv(n_feats, n_feats, kernel_size),
-        )
+        
+        self.encoder = Encoder(c_in=1, c_hid=n_feats, n_s=4, k=kernel_size, act_inplace=False)
+        self.decoder = Decoder(c_hid=n_feats, c_out=1, n_s=4, k=kernel_size, act_inplace=False)
         self.flowseek = FlowSeek(args)
+        self.hid = MidPFG(in_ch=out_slice * n_feats, depth=num_blocks, groups_pw=1, layerscale_init=1e-6, cel_k=(3, 5, 7), drop=0.0, drop_path=0.0, pfga_K=(9, 15, 31))
 
-        modules_body = [
-            I2Group(
-                conv,
-                n_depth=2,
-                n_feat=n_feats,
-                kernel_size=kernel_size,
-                act=act,
-                res_scale=res_scale,
-                head_num=head_num,
-                win_num_sqrt=win_num_sqrt,
-                window_size=window_size,
-            )
-            for _ in range(num_blocks // 2)
-        ]
-        self.body = nn.ModuleList(modules_body)
-
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
-
-        self.fuse_align = nn.Conv2d(3 * n_feats, n_feats, 1, 1, 0)
-
-        modules_tail = [
-            conv(n_feats, n_feats, kernel_size),
-            nn.ReLU(),
-            conv(n_feats, out_slice * 2, kernel_size),
-        ]
-        self.tail = nn.Sequential(*modules_tail)
-        tail_last = self.tail[-1]
-        with torch.no_grad():
-            nn.init.normal_(tail_last.weight[out_slice:], mean=0.0, std=1e-4)
-            if tail_last.bias is not None:
-                nn.init.zeros_(tail_last.bias[:out_slice])
+        # modules_tail = [
+        #     conv(out_slice, n_feats, kernel_size),
+        #     nn.ReLU(),
+        #     conv(n_feats, out_slice * 2, kernel_size),
+        # ]
+        # self.tail = nn.Sequential(*modules_tail)
+        # tail_last = self.tail[-1]
+        # with torch.no_grad():
+        #     nn.init.normal_(tail_last.weight[out_slice:], mean=0.0, std=1e-4)
+        #     if tail_last.bias is not None:
+        #         nn.init.zeros_(tail_last.bias[:out_slice])
 
     def _vol_to_flowseek_rgb(self, vol):  # vol: (B, 1, H, W) 或 (B, H, W)
         if vol.ndim == 3:
@@ -115,39 +93,35 @@ class I3Net(nn.Module):
         i_start = x[:, :-1, :, :]
         i_end = x[:, 1:, :, :]
         
-        # B, T, H, W = x.shape
         warped0, warped1 = self._get_align(i_start, i_end)
+        B, T, H, W = warped0.shape
 
-        align_input = torch.cat([x, warped0, warped1], 1)
-        x_head = self.head(align_input)
+        x0 = warped0.view(B * T, -1, H, W)
+        embed, skip = self.encoder(x0)
+        _, c2, h2, w2 = embed.shape
+        z = embed.view(B, T, c2, h2, w2)
 
-        res = x_head
+        z = self.hid(z)
+        hid = z.reshape(B * T, c2, h2, w2)
 
-        align_list = []
-        res = self.alignment[0](res) + res
-        align_list.append(res)
+        y = self.decoder(hid, skip)
+        y = y.view(-1, T, H, W)
 
-        for id, layer in enumerate(self.body):
-            res = layer(res)
-            if id in [3, 7]:
-                res = self.alignment[id // 4 + 1](res) + res
-                align_list.append(res)
+        y[:, :: self.args.upscale] = x
+        y = y.permute(0, 2, 3, 1).contiguous()
 
-        res = self.fuse_align(torch.cat(align_list, 1))
+        return y
 
-        res += x_head
+        # raw_output = self.tail(y)
+        # mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
+        # delta = raw_output[:, self.args.hr_slice_patch :, :, :]
 
-        raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
+        # out = mask * warped0 + (1 - mask) * warped1 + delta
 
-        mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
-        delta = raw_output[:, self.args.hr_slice_patch :, :, :]
+        # out[:, :: self.args.upscale] = x
+        # out = out.permute(0, 2, 3, 1).contiguous()
 
-        out = mask * warped0 + (1 - mask) * warped1 + delta
-
-        out[:, :: self.args.upscale] = x
-        out = out.permute(0, 2, 3, 1).contiguous()
-
-        return out
+        # return out
 
 
 if __name__ == "__main__":
@@ -160,7 +134,7 @@ if __name__ == "__main__":
     )
 
     args = parse_args(parser)
-    args.upscale = 3
+    args.upscale = 2
     args.n_feats = 64
     args.kernel_size = 3
     args.res_scale = 1

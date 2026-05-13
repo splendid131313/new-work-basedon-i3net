@@ -23,25 +23,24 @@ def select_optim(opt,net):
     return optimizer
 
 ###### optim ######
-def select_scheduler(opt,optimizer):
+def select_scheduler(opt, optimizer):
     if opt.schedule == 'step':
         scheduler = lrs.StepLR(
             optimizer,
             step_size=opt.lr_decay,
-            gamma=opt.gamma
+            gamma=opt.gamma,
         )
-    if opt.schedule == 'cos_lr':
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.Tmax, \
-        #                                                eta_min=opt.lr / opt.lr_gap)
-        scheduler = CosineLRScheduler(optimizer,
-                                      t_initial=opt.max_epoch,
-                                      lr_min=opt.lr/10,
-                                      warmup_lr_init=opt.lr/100,
-                                      warmup_t=int(opt.max_epoch * opt.warmup_epoch),
-                                      cycle_limit=1,
-                                      t_in_epochs=False,
+    elif opt.schedule == 'cos_lr':
+        scheduler = CosineLRScheduler(
+            optimizer,
+            t_initial=opt.max_epoch,
+            lr_min=opt.min_lr,
+            warmup_lr_init=opt.warmup_lr,
+            warmup_t=int(opt.warmup_epoch),
+            cycle_limit=1,
+            t_in_epochs=True,
+            k_decay=opt.lr_k_decay,
         )
-
     elif opt.schedule == 'Tmin':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min',
                                                                patience=opt.patience, threshold=0.000001)

@@ -34,8 +34,8 @@ model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/we
 # Training / test parameters
 learn_arg = add_argument_group('Learning')
 #### optim ####
-learn_arg.add_argument('--optim', type=str, default='Adam') 
-learn_arg.add_argument('--lr', type=float, default=(3e-4)) # 0.0003
+learn_arg.add_argument('--optim', type=str, default='Adam')
+learn_arg.add_argument('--lr', type=float, default=1e-3)
 learn_arg.add_argument('--wd', type=float, default=(1e-4), help='weight decay')
 learn_arg.add_argument('--beta1', type=float, default=0.9, help='Adam-beta1')
 learn_arg.add_argument('--beta2', type=float, default=0.999, help='Adam-beta2')
@@ -44,13 +44,18 @@ learn_arg.add_argument('--flood', type=bool, default=False)
 #### schedule ####
 learn_arg.add_argument('--schedule', type=str, default='cos_lr', help='step/cos_lr/Tmax/Tmin') 
 learn_arg.add_argument('--lr_decay', type=int, default=400)
-learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度')
+learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度 (step 用)')
+learn_arg.add_argument('--lr_k_decay', type=float, default=1.0, help='cos_lr: k-decay 系数 (1.0 为标准余弦)')
+learn_arg.add_argument('--warmup_lr', type=float, default=1e-5, help='cos_lr: warmup 起始学习率')
+learn_arg.add_argument('--min_lr', type=float, default=1e-6, help='cos_lr: 余弦下界')
+learn_arg.add_argument('--warmup_epoch', type=int, default=0, help='cos_lr: warmup 轮数（按 epoch）')
+learn_arg.add_argument('--patience', type=int, default=10, help='ReduceLROnPlateau (Tmin/Tmax)')
 #### epoch/bs ####
 learn_arg.add_argument('--batch_size', type=int, default=6)
 learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapling n times of each volume')
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
-learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
+# learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
 
 
 # Misc

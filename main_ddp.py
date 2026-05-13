@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import compute_reprojection_loss
+from select_loss import compute_reprojection_loss, Select_Loss
 
 
 def main():
@@ -85,7 +85,7 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = compute_reprojection_loss
+    loss_function = Select_Loss(args)
 
     # if is_main:
     #     wandb.init(
@@ -187,7 +187,7 @@ def main():
         if args.schedule == "step":
             scheduler.step()
         elif args.schedule == "cos_lr":
-            scheduler.step_update(epoch)
+            scheduler.step(epoch)
         elif args.schedule == "Tmin":
             scheduler.step(loss_epoch)
         elif args.schedule == "Tmax":
