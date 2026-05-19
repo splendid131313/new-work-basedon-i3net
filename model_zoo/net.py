@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, CrossViewBlock
-from .i3net.pfg import MidPFG, Encoder, Decoder
-from .flowseek.core.flowseek import FlowSeek
-from .i3net.flow_module import warp
+# from .i3net.basic_model import default_conv, CrossViewBlock
+# from .i3net.pfg import MidPFG, Encoder, Decoder
+# from .flowseek.core.flowseek import FlowSeek
+# from .i3net.flow_module import warp
 
-# from i3net.basic_model import default_conv, CrossViewBlock
-# from i3net.pfg import MidPFG, Encoder, Decoder
-# from flowseek.core.flowseek import FlowSeek
-# from i3net.flow_module import warp
+from i3net.basic_model import default_conv, CrossViewBlock
+from i3net.pfg import MidPFG, Encoder, Decoder
+from flowseek.core.flowseek import FlowSeek
+from i3net.flow_module import warp
 
 def make_model(args):
     return I3Net(args)
@@ -32,17 +32,17 @@ class I3Net(nn.Module):
         self.flowseek = FlowSeek(args)
         self.hid = MidPFG(in_ch=out_slice * n_feats, depth=num_blocks, groups_pw=1, layerscale_init=1e-6, cel_k=(3, 5, 7), drop=0.0, drop_path=0.0, pfga_K=(9, 15, 31))
 
-        # modules_tail = [
-        #     conv(out_slice, n_feats, kernel_size),
-        #     nn.ReLU(),
-        #     conv(n_feats, out_slice * 2, kernel_size),
-        # ]
-        # self.tail = nn.Sequential(*modules_tail)
-        # tail_last = self.tail[-1]
-        # with torch.no_grad():
-        #     nn.init.normal_(tail_last.weight[out_slice:], mean=0.0, std=1e-4)
-        #     if tail_last.bias is not None:
-        #         nn.init.zeros_(tail_last.bias[:out_slice])
+        modules_tail = [
+            conv(out_slice, n_feats, kernel_size),
+            nn.ReLU(),
+            conv(n_feats, out_slice * 2, kernel_size),
+        ]
+        self.tail = nn.Sequential(*modules_tail)
+        tail_last = self.tail[-1]
+        with torch.no_grad():
+            nn.init.normal_(tail_last.weight[out_slice:], mean=0.0, std=1e-4)
+            if tail_last.bias is not None:
+                nn.init.zeros_(tail_last.bias[:out_slice])
 
     def _vol_to_flowseek_rgb(self, vol):  # vol: (B, 1, H, W) 或 (B, H, W)
         if vol.ndim == 3:
@@ -107,21 +107,21 @@ class I3Net(nn.Module):
         y = self.decoder(hid, skip)
         y = y.view(-1, T, H, W)
 
-        y[:, :: self.args.upscale] = x
-        y = y.permute(0, 2, 3, 1).contiguous()
+        # y[:, :: self.args.upscale] = x
+        # y = y.permute(0, 2, 3, 1).contiguous()
+        #
+        # return y
 
-        return y
+        raw_output = self.tail(y)
+        mask = torch.sigmoid(raw_output[:, :self.args.hr_slice_patch, :, :])
+        delta = raw_output[:, self.args.hr_slice_patch:, :, :]
 
-        # raw_output = self.tail(y)
-        # mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
-        # delta = raw_output[:, self.args.hr_slice_patch :, :, :]
+        out = mask * warped0 + (1 - mask) * warped1 + delta
 
-        # out = mask * warped0 + (1 - mask) * warped1 + delta
+        out[:, :: self.args.upscale] = x
+        out = out.permute(0, 2, 3, 1).contiguous()
 
-        # out[:, :: self.args.upscale] = x
-        # out = out.permute(0, 2, 3, 1).contiguous()
-
-        # return out
+        return out
 
 
 if __name__ == "__main__":
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     args.head_num = 1
     args.win_num_sqrt = 16
     args.image_size = 256
-    args.lr_time_list = [0, 0.3, 0.6, 1]
+    args.lr_time_list = [0, 0.5, 1]
 
     gpy_id = 0
     model = I3Net(args).cuda(gpy_id)
