@@ -46,16 +46,15 @@ learn_arg.add_argument('--schedule', type=str, default='cos_lr', help='step/cos_
 learn_arg.add_argument('--lr_decay', type=int, default=400)
 learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度')
 #### epoch/bs ####
-learn_arg.add_argument('--batch_size', type=int, default=8)
+learn_arg.add_argument('--batch_size', type=int, default=6)
 learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapling n times of each volume')
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
 #### loss ####
 learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
-learn_arg.add_argument('--lambda_ssim', type=float, default=0.2)
-learn_arg.add_argument('--lambda_freq', type=float, default=0.2)
-learn_arg.add_argument('--lambda_motion', type=float, default=0.05)
+learn_arg.add_argument('--lambda_fre', type=float, default=0.1)
+learn_arg.add_argument('--lambda_gra', type=float, default=0.05)
 
 # Misc
 misc_arg = add_argument_group('Misc')

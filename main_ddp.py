@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import MedLoss
+from select_loss import TotalLoss
 
 
 def main():
@@ -87,7 +87,7 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = MedLoss(args)
+    loss_function = TotalLoss(args).to(device)
 
     if is_main:
         wandb.init(
@@ -134,6 +134,7 @@ def main():
             if use_amp:
                 with autocast():
                     sr = model(lr)
+                with autocast(enabled=False):
                     loss_iter = loss_function(sr, gt)
                     loss = loss_iter
                 scaler.scale(loss).backward()
