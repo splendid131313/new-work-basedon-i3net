@@ -53,7 +53,7 @@ learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
 #### loss ####
 learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
-learn_arg.add_argument('--lambda_fre', type=float, default=0.1)
+learn_arg.add_argument('--lambda_lap', type=float, default=0.2)
 learn_arg.add_argument('--lambda_gra', type=float, default=0.05)
 
 # Misc
@@ -77,6 +77,5 @@ def get_args():
     
     args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
     args.lr_time_list = torch.linspace(0, 1, args.upscale - 1 + 2)
-    # args.hr_time_list = torch.linspace(0, 1, args.hr_slice_patch)
     return args, unparsed
 

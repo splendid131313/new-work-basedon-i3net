@@ -87,7 +87,7 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = TotalLoss(args).to(device)
+    loss_function = TotalLoss(args, device=device).to(device)
 
     if is_main:
         wandb.init(
