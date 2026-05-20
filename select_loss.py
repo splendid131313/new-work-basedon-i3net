@@ -1,5 +1,7 @@
 import torch
 from torch import nn
+import torch.fft
+from pytorch_msssim import ssim
 
 class Select_Loss(nn.Module):
     def __init__(self,args):
@@ -12,47 +14,73 @@ class Select_Loss(nn.Module):
         loss = l1loss 
         return loss
 
+class MedLoss(nn.Module):
+    def __init__(
+        self, args
+    ):
+        super().__init__()
 
-class SSIM(nn.Module):
-    """Layer to compute the SSIM loss between a pair of images
-    """
-    def __init__(self):
-        super(SSIM, self).__init__()
-        self.mu_x_pool   = nn.AvgPool2d(3, 1)
-        self.mu_y_pool   = nn.AvgPool2d(3, 1)
-        self.sig_x_pool  = nn.AvgPool2d(3, 1)
-        self.sig_y_pool  = nn.AvgPool2d(3, 1)
-        self.sig_xy_pool = nn.AvgPool2d(3, 1)
+        self.args = args
+        self.lambda_l1 = args.lambda_l1
+        self.lambda_ssim = args.lambda_ssim
+        self.lambda_freq = args.lambda_freq
+        self.lambda_motion = args.lambda_motion
 
-        self.refl = nn.ReflectionPad2d(1)
+        self.l1 = nn.L1Loss()
 
-        self.C1 = 0.01 ** 2
-        self.C2 = 0.03 ** 2
+    def frequency_loss(self, pred, gt):
+        pred_fft = torch.fft.rfft2(pred, dim=(-2, -1), norm="ortho")
+        gt_fft = torch.fft.rfft2(gt, dim=(-2, -1), norm="ortho")
 
-    def forward(self, x, y):
-        x = self.refl(x)
-        y = self.refl(y)
+        pred_amp = torch.abs(pred_fft)
+        gt_amp = torch.abs(gt_fft)
 
-        mu_x = self.mu_x_pool(x)
-        mu_y = self.mu_y_pool(y)
+        return self.l1(pred_amp, gt_amp)
+    
+    def sequence_ssim_loss(self, pred, gt):
 
-        sigma_x  = self.sig_x_pool(x ** 2) - mu_x ** 2
-        sigma_y  = self.sig_y_pool(y ** 2) - mu_y ** 2
-        sigma_xy = self.sig_xy_pool(x * y) - mu_x * mu_y
+        # pred: [B,T,H,W]
 
-        SSIM_n = (2 * mu_x * mu_y + self.C1) * (2 * sigma_xy + self.C2)
-        SSIM_d = (mu_x ** 2 + mu_y ** 2 + self.C1) * (sigma_x + sigma_y + self.C2)
+        B, T, H, W = pred.shape
 
-        return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)
+        total = 0
 
-def compute_reprojection_loss(pred, target):
-    """Computes reprojection loss between a batch of predicted and target images
-    """
-    abs_diff = torch.abs(target - pred)
-    l1_loss = abs_diff.mean(1, True)
+        for t in range(1, T, self.args.upscale):
 
-    ssim = SSIM().to(pred.device, pred.dtype)
-    ssim_loss = ssim(pred, target).mean(1, True)
-    reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
+            total += 1 - ssim(
+                pred[:, t:t+1],
+                gt[:, t:t+1],
+                data_range=1.0,
+                size_average=True
+            )
 
-    return reprojection_loss.mean()
+        return total / (self.args.lr_slice_patch - 1)
+
+    def forward(self, pred, gt, motion_loss=None):
+        pred = pred.permute(0, 3, 1, 2)
+        gt = gt.permute(0, 3, 1, 2)
+
+        # L1
+        if self.lambda_l1 > 0:
+            loss_l1 = self.l1(pred, gt)
+
+        # SSIM
+        if self.lambda_ssim > 0:    
+            loss_ssim = self.sequence_ssim_loss(pred, gt)
+
+        # Frequency
+        if self.lambda_freq > 0:
+            loss_freq = self.frequency_loss(pred, gt)
+
+        total_loss = 0
+        if self.lambda_l1 > 0:
+            total_loss += self.lambda_l1 * loss_l1
+        if self.lambda_ssim > 0:
+            total_loss += self.lambda_ssim * loss_ssim
+        if self.lambda_freq > 0:
+            total_loss += self.lambda_freq * loss_freq
+
+        if motion_loss is not None:
+            total_loss += self.lambda_motion * motion_loss
+
+        return total_loss

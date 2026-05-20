@@ -16,7 +16,7 @@ def add_argument_group(name):
 data_arg = add_argument_group('Dataset')
 data_arg.add_argument('--data_type', type=str, default='direct')
 data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
-data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/train')
+data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task06_Lung/train')
 data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
 data_arg.add_argument('--image_size', type=int, default=256)
 
@@ -46,17 +46,21 @@ learn_arg.add_argument('--schedule', type=str, default='cos_lr', help='step/cos_
 learn_arg.add_argument('--lr_decay', type=int, default=400)
 learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度')
 #### epoch/bs ####
-learn_arg.add_argument('--batch_size', type=int, default=6)
+learn_arg.add_argument('--batch_size', type=int, default=8)
 learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapling n times of each volume')
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
-
+#### loss ####
+learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
+learn_arg.add_argument('--lambda_ssim', type=float, default=0.2)
+learn_arg.add_argument('--lambda_freq', type=float, default=0.2)
+learn_arg.add_argument('--lambda_motion', type=float, default=0.05)
 
 # Misc
 misc_arg = add_argument_group('Misc')
-misc_arg.add_argument('--ckpt_dir', type=str, default='colon',help='saved filename')
-misc_arg.add_argument('--gpu_id', type=str, default='0,1')
+misc_arg.add_argument('--ckpt_dir', type=str, default='default',help='saved filename')
+misc_arg.add_argument('--gpu_id', type=str, default='0')
 misc_arg.add_argument('--num_workers', type=int, default=8)
 misc_arg.add_argument('--parallel', type=bool, default=True, help="parallel training")
 misc_arg.add_argument("--local_rank", default=os.getenv('LOCAL_RANK', 0), type=int)

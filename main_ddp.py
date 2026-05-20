@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import compute_reprojection_loss
+from select_loss import MedLoss
 
 
 def main():
@@ -44,6 +44,8 @@ def main():
     torch.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
+
+    wandb_name = args.ckpt_dir
 
     args.ckpt_dir = "experiments/" + args.ckpt_dir
     if is_main:
@@ -85,14 +87,14 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = compute_reprojection_loss
+    loss_function = MedLoss(args)
 
-    # if is_main:
-    #     wandb.init(
-    #         project="i3net",
-    #         name="flow_module",
-    #         config=args.__dict__,
-    #     )
+    if is_main:
+        wandb.init(
+            project="loss",
+            name=wandb_name,
+            config=args.__dict__,
+        )
 
     # amp
     use_amp = args.amp
@@ -199,25 +201,22 @@ def main():
             with torch.no_grad():
                 b, h, w, s = gt.shape
                 mid_s = s // 2
-                lr = torch.clamp(lr, 0, 1)
                 sr = torch.clamp(sr, 0, 1)
                 gt = torch.clamp(gt, 0, 1)
-                lr_mid = lr[0, :, :, lr.shape[3] // 2].detach().cpu().float().numpy()
                 sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
                 gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
 
-                # wandb.log(
-                #     {
-                #         "train/psnr_epoch": psnr_epoch,
-                #         "train/psnr_pred_epoch": psnr_pred_epoch,
-                #         "train/loss_epoch": loss_iter_epoch,
-                #         "train/lr": lr_tmp,
-                #         "epoch": epoch,
-                #         "vis/lr_slice": wandb.Image(lr_mid, caption="LR input"),
-                #         "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
-                #         "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
-                #     }
-                # )
+                wandb.log(
+                    {
+                        "train/psnr_epoch": psnr_epoch,
+                        "train/psnr_pred_epoch": psnr_pred_epoch,
+                        "train/loss_epoch": loss_iter_epoch,
+                        "train/lr": lr_tmp,
+                        "epoch": epoch,
+                        "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
+                        "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
+                    }
+                )
 
             log = (
                 f"epoch[{epoch + 1}/{args.max_epoch}] "
@@ -234,8 +233,8 @@ def main():
                     args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
                 )
 
-    # if is_main:
-    #     wandb.finish()
+    if is_main:
+        wandb.finish()
 
     dist.destroy_process_group()
 

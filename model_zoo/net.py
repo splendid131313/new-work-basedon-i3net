@@ -92,18 +92,18 @@ class I3Net(nn.Module):
             img1 = self._vol_to_flowseek_rgb(img1)
 
             with torch.no_grad():
-                # flow = self.flowseek(img0, img1, test_mode=True)["final"]
-                flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
-                flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
+                flow = self.flowseek(img0, img1, test_mode=True)["final"]
+                # flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
+                # flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
 
             for j in range(1, self.args.upscale):
                 time = j / self.args.upscale
                 curr_idx = i * self.args.upscale + j
 
-                # img0t = warp(img0, flow * time)
-                # imgt1 = warp(img1, flow * (1 - time))
-                img0t = warp(img0, -flow01 * time)
-                imgt1 = warp(img1, -flow10 * (1 - time))
+                img0t = warp(img0, flow * time)
+                imgt1 = warp(img1, flow * (1 - time))
+                # img0t = warp(img0, -flow01 * time)
+                # imgt1 = warp(img1, -flow10 * (1 - time))
 
                 w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
