@@ -48,11 +48,15 @@ class SSIM(nn.Module):
 def compute_reprojection_loss(pred, target):
     """Computes reprojection loss between a batch of predicted and target images
     """
+
+    pred = pred.permute(0,3,1,2)
+    target = target.permute(0,3,1,2)
+
     abs_diff = torch.abs(target - pred)
     l1_loss = abs_diff.mean(1, True)
 
     ssim = SSIM().to(pred.device, pred.dtype)
     ssim_loss = ssim(pred, target).mean(1, True)
-    reprojection_loss = 0.30 * ssim_loss + 0.70 * l1_loss
+    reprojection_loss = 0.20 * ssim_loss + 0.80 * l1_loss
 
     return reprojection_loss.mean()

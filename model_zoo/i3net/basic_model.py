@@ -118,6 +118,31 @@ class SliceAttentionModule(nn.Module):
 
         return x * att
 
+
+class FreqSliceAttentionModule(nn.Module):
+    """Slice attention in DCT domain; weights from spectral stats, output in pixel domain."""
+
+    def __init__(self, in_features, n_feats=64):
+        super().__init__()
+        self.dct = DCT2x()
+        self.idct = IDCT2x()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, n_feats),
+            nn.ReLU(),
+            nn.Linear(n_feats, in_features),
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x_dct = self.dct(x)
+
+        avg = torch.mean(x_dct, dim=(2, 3))
+        maxv = torch.amax(x_dct, dim=(2, 3))
+        att = torch.sigmoid(self.mlp(avg) + self.mlp(maxv)).view(B, C, 1, 1)
+
+        return self.idct(x_dct * att)
+
+
 class IntraSliceBranch(nn.Module):
     def __init__(self,conv=nn.Conv2d,n_feat=64,kernel_size=3,bias=True,
                  head_num=1, win_num_sqrt=16, window_size=16):
