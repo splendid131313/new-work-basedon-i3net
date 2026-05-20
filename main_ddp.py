@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import compute_reprojection_loss
+from select_loss import compute_reprojection_loss, Select_Loss
 
 
 def main():
@@ -44,6 +44,8 @@ def main():
     torch.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
+
+    wandb_name = args.ckpt_dir
 
     args.ckpt_dir = "experiments/" + args.ckpt_dir
     if is_main:
@@ -85,12 +87,12 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = compute_reprojection_loss
+    loss_function = Select_Loss(args)
 
     # if is_main:
     #     wandb.init(
-    #         project="i3net",
-    #         name="flow_module",
+    #         project="i3net_flowseek",
+    #         name=wandb_name,
     #         config=args.__dict__,
     #     )
 

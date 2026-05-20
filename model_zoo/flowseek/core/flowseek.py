@@ -161,8 +161,9 @@ class FlowSeek(
         image1_res = image1_res / mean - std # should be (image1_res - mean) / std. Models were trained with image1_res / mean - std, switching to the correct normalization alters EPE on the second digit 
         image2_res = image2_res / mean - std # should be (image2_res - mean) / std. Models were trained with image2_res / mean - std, switching to the correct normalization alters EPE on the second digit
 
-        im1_path1, depth1 = self.dav2.forward(image1_res.float())
-        im2_path1, _ = self.dav2.forward(image2_res.float())
+        with torch.no_grad():
+            im1_path1, depth1 = self.dav2.forward(image1_res.float())
+            im2_path1, _ = self.dav2.forward(image2_res.float())
 
         im1_path1 = F.interpolate(im1_path1, (H, W), mode="bilinear", align_corners = False)
         im2_path1 = F.interpolate(im2_path1, (H, W), mode="bilinear", align_corners = False)
