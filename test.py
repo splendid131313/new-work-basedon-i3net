@@ -89,7 +89,7 @@ def main():
             gt_i = i * args.upscale
             tmp_gt = gt[...,gt_i:gt_i+args.hr_slice_patch] #[h,w,s]
             with torch.no_grad():
-                tmp_sr = model(tmp_lr)
+                tmp_sr, flow = model(tmp_lr)
 
             tmp_sr_cpu = torch.clamp(tmp_sr.squeeze(0), 0, 1).detach().cpu()
             tmp_gt_cpu = tmp_gt.detach().cpu()

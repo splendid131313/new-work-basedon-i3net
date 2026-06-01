@@ -78,6 +78,7 @@ class I3Net(nn.Module):
 
         w0_seq = torch.zeros((B, self.args.hr_slice_patch, H, W)).to(i_start.device)
         w1_seq = torch.zeros((B, self.args.hr_slice_patch, H, W)).to(i_start.device)
+        flow_list = []
 
         for i in range(self.args.lr_slice_patch):
             idx = i * self.args.upscale
@@ -91,6 +92,7 @@ class I3Net(nn.Module):
             img1 = self._vol_to_flowseek_rgb(img1)
 
             flow = self.flowseek(img0, img1, test_mode=True)["final"]
+            flow_list.append(flow)
 
             # flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
             # flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
@@ -108,7 +110,7 @@ class I3Net(nn.Module):
                 w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
 
-        return w0_seq, w1_seq
+        return w0_seq, w1_seq, flow_list
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2).contiguous()
@@ -116,7 +118,7 @@ class I3Net(nn.Module):
         i_end = x[:, 1:, :, :]
         
         # B, T, H, W = x.shape
-        warped0, warped1 = self._get_align(i_start, i_end)
+        warped0, warped1, flow_list = self._get_align(i_start, i_end)
 
         align_input = torch.cat([x, warped0, warped1], 1)
         x_head = self.head(align_input)
@@ -147,7 +149,7 @@ class I3Net(nn.Module):
         out[:, :: self.args.upscale] = x
         out = out.permute(0, 2, 3, 1).contiguous()
 
-        return out
+        return out, flow_list
 
 
 if __name__ == "__main__":

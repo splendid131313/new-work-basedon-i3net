@@ -29,7 +29,7 @@ model_arg.add_argument("--resume", type=bool, default=False, help='run resume or
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
 model_arg.add_argument("--flow_cfg", type=str, default="flowseek-S.json")
 model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/weights/flowseek_T_CT.pth")
-model_arg.add_argument("--flowseek_finetune_mode", type=str, default="adapter",
+model_arg.add_argument("--flowseek_finetune_mode", type=str, default="full",
     help=("FlowSeek 分段微调: frozen | merge_head | heads | adapter | lite | refine | full "),
 )
 
@@ -53,11 +53,15 @@ learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapli
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
-
-
+#### loss ####
+learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
+learn_arg.add_argument('--lambda_lap', type=float, default=0.2)
+learn_arg.add_argument('--lambda_gra', type=float, default=0.05)
+learn_arg.add_argument('--lambda_flow', type=float, default=0.01)
+learn_arg.add_argument('--lambda_ssim', type=float, default=0.1)
 # Misc
 misc_arg = add_argument_group('Misc')
-misc_arg.add_argument('--ckpt_dir', type=str, default='adapter',help='saved filename')
+misc_arg.add_argument('--ckpt_dir', type=str, default='full-total-loss',help='saved filename')
 misc_arg.add_argument('--gpu_id', type=str, default='0')
 misc_arg.add_argument('--num_workers', type=int, default=8)
 misc_arg.add_argument('--parallel', type=bool, default=True, help="parallel training")
