@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import TotalLoss, edge_aware_smoothness
+from select_loss import Select_Loss
 
 
 def main():
@@ -87,8 +87,7 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = TotalLoss(args, device=device).to(device)
-    flow_loss = edge_aware_smoothness
+    loss_function = Select_Loss(args).to(device)
 
     if is_main:
         wandb.init(
@@ -105,6 +104,10 @@ def main():
     else:
         scaler = None
         autocast = None
+
+    best_psnr = 0.0
+    last_80_start = int(0.8 * args.max_epoch)
+    last_99_start = int(0.99 * args.max_epoch)
 
     model.train()
     for epoch in range(args.start_epoch, args.max_epoch):
@@ -136,16 +139,14 @@ def main():
                 with autocast():
                     sr, flow_list = model(lr)
                     loss_iter = loss_function(sr, gt)
-                    flow_loss_iter = flow_loss(flow_list, lr)
-                    loss = loss_iter + flow_loss_iter * args.lambda_flow
+                    loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 sr, flow_list = model(lr)
                 loss_iter = loss_function(sr, gt)
-                flow_loss_iter = flow_loss(flow_list, lr)
-                loss = loss_iter + flow_loss_iter * args.lambda_flow
+                loss = loss_iter
                 loss.backward()
                 optimizer.step()
 
@@ -228,11 +229,20 @@ def main():
             now = str(datetime.datetime.now())
             print(now + " " + log)
 
-            if epoch + 1 > int(0.99 * args.max_epoch):
-                os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
-                state_dict = model.module.state_dict()  # DDP
+            os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
+
+            if epoch + 1 > last_80_start and psnr_epoch > best_psnr:
+                best_psnr = psnr_epoch
+                state_dict = model.module.state_dict()
                 torch.save(
-                    {"epoch": epoch + 1, "state_dict": state_dict},
+                    state_dict,
+                    args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
+                )
+                print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
+
+            if epoch + 1 > last_99_start:
+                state_dict = model.module.state_dict()
+                torch.save(state_dict,
                     args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
                 )
 
