@@ -156,3 +156,87 @@ class TotalLoss(nn.Module):
             freq = self.lap_loss(pred, target) * self.lambda_lap
             grad = self.grad_loss(pred, target) * self.lambda_gra
             return l1 + freq + grad 
+
+
+class TissueVarianceLoss(nn.Module):
+    def __init__(self, win_size=7, eps=1e-4, upscale=2):
+        super().__init__()
+
+        self.win_size = win_size
+        self.eps = eps
+        self.upscale = upscale
+
+    def local_std(self, x):
+
+        mean = F.avg_pool2d(x, self.win_size, stride=1, padding=self.win_size // 2)
+        mean_sq = F.avg_pool2d(x * x, self.win_size, stride=1, padding=self.win_size // 2)
+        var = F.relu(mean_sq - mean * mean)
+
+        return var
+
+    def _interp_slice_indices(self, num_slices):
+        return [i for i in range(num_slices) if i % self.upscale != 0]
+
+    def forward(self, pred, gt):
+        with autocast(enabled=False):
+            pred = pred.float().permute(0, 3, 1, 2).contiguous()
+            gt = gt.float().permute(0, 3, 1, 2).contiguous()
+
+            interp_idx = self._interp_slice_indices(pred.shape[1])
+            if not interp_idx:
+                return pred.sum() * 0.0
+
+            pred_var = self.local_std(pred[:, interp_idx])
+            gt_var = self.local_std(gt[:, interp_idx]).detach()
+
+            loss = F.l1_loss(pred_var, gt_var)
+
+        return loss
+
+
+class CrossSliceVarianceLoss(nn.Module):
+    def __init__(self, win_size=7, upscale=2):
+        super().__init__()
+        self.win_size = win_size
+        self.upscale = upscale
+
+    def local_std(self, x):
+        mean = F.avg_pool2d(x, self.win_size, stride=1, padding=self.win_size // 2)
+        mean_sq = F.avg_pool2d(x * x, self.win_size, stride=1, padding=self.win_size // 2)
+        var = F.relu(mean_sq - mean * mean)
+        return var
+
+    def _interp_slice_indices(self, num_slices):
+        return [i for i in range(num_slices) if i % self.upscale != 0]
+
+    def _neighbor_anchor_indices(self, interp_idx):
+        prev_anchor = (interp_idx // self.upscale) * self.upscale
+        return prev_anchor, prev_anchor + self.upscale
+
+    def forward(self, pred, gt):
+        with autocast(enabled=False):
+            pred = pred.float().permute(0, 3, 1, 2).contiguous()
+            gt = gt.float().permute(0, 3, 1, 2).contiguous()
+
+            interp_idx = self._interp_slice_indices(pred.shape[1])
+            if not interp_idx:
+                return pred.sum() * 0.0
+
+            pred_tex_list = []
+            ref_tex_list = []
+            for i in interp_idx:
+                prev_i, next_i = self._neighbor_anchor_indices(i)
+                pred_tex_list.append(self.local_std(pred[:, i : i + 1]))
+                ref_tex_list.append(
+                    (
+                        self.local_std(gt[:, prev_i : prev_i + 1])
+                        + self.local_std(gt[:, next_i : next_i + 1])
+                    )
+                    / 2
+                )
+
+            pred_tex = torch.cat(pred_tex_list, dim=1)
+            ref_tex = torch.cat(ref_tex_list, dim=1).detach()
+            loss = F.l1_loss(pred_tex, ref_tex)
+
+        return loss

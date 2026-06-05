@@ -53,8 +53,9 @@ learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
 #### loss ####
 learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
-learn_arg.add_argument('--lambda_lap', type=float, default=0.2)
-learn_arg.add_argument('--lambda_gra', type=float, default=0.05)
+learn_arg.add_argument('--lambda_lap', type=float, default=0.0)
+learn_arg.add_argument('--lambda_gra', type=float, default=0.0)
+learn_arg.add_argument('--lambda_tissue', type=float, default=0.1)
 
 # Misc
 misc_arg = add_argument_group('Misc')
