@@ -27,7 +27,6 @@ model_arg.add_argument('--upscale', type=int, default=2, help='scale_factor')
 model_arg.add_argument("--resume", type=bool, default=False, help='run resume or not')
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
 
-
 # Training / test parameters
 learn_arg = add_argument_group('Learning')
 #### optim ####

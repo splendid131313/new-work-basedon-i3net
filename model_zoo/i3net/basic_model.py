@@ -5,19 +5,10 @@ import einops
 from functools import partial
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
+from timm.models.layers import DropPath, trunc_normal_
+from pytorch_wavelets import DWTForward
 
 from .dct_util import DCT2x,IDCT2x
-# from .utils_win import window_partitionx,window_reversex
-
-
-def make_model(args):
-    return I3Net(args)
-
-#####################################################################
-def default_conv(in_channelss, out_channels, kernel_size, bias=True):
-    return nn.Conv2d(
-        in_channelss, out_channels, kernel_size,
-        padding=(kernel_size // 2), bias=bias)
 
 def window_partitions(x, window_size):
     """
@@ -98,8 +89,189 @@ class GDFN(nn.Module):
         x = self.project_out(F.gelu(x1) * x2)
         return x
 
+class BasicConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, upsampling=False, act_norm=False, act_inplace=True,):
+        super(BasicConv2d, self).__init__()
+        self.act_norm = act_norm
+        if upsampling is True:
+            self.conv = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * 4, kernel_size=kernel_size, stride=1, padding=padding, dilation=dilation),
+                nn.PixelShuffle(2)
+            )
+        else:
+            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation)
 
-#####################################################################
+        self.norm = nn.GroupNorm(2, out_channels)
+        self.act = nn.SiLU(inplace=act_inplace)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d)):
+            trunc_normal_(m.weight, std=0.02)
+            nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        y = self.conv(x)
+        if self.act_norm:
+            y = self.act(self.norm(y))
+        
+        return y
+
+
+class ConvSC(nn.Module):
+    def __init__(self, C_in, C_out, kernel_size=3, downsampling=False, upsampling=False, act_norm=True, act_inplace=True,):
+        super(ConvSC, self).__init__()
+
+        stride = 2 if downsampling is True else 1
+        padding = (kernel_size - stride + 1) // 2
+
+        self.conv = BasicConv2d(C_in, C_out, kernel_size=kernel_size, stride=stride, upsampling=upsampling, padding=padding, act_norm=act_norm, act_inplace=act_inplace)
+
+    def forward(self, x):
+        y = self.conv(x)
+        return y
+
+
+class SliceEncoder(nn.Module):
+    """Multi-scale encoder for slice input; outputs align with net downsample stages."""
+
+    def __init__(self, c_in: int, channels, k: int = 3, act_inplace: bool = False):
+        super().__init__()
+        c0, c1, c2, c3 = channels
+        self.stages = nn.ModuleList([
+            nn.Sequential(
+                ConvSC(c_in, c0, k, downsampling=False, act_inplace=act_inplace),
+            ),
+            nn.Sequential(
+                ConvSC(c0, c1, k, downsampling=True, act_inplace=act_inplace),
+                ConvSC(c1, c1, k, downsampling=False, act_inplace=act_inplace),
+            ),
+            nn.Sequential(
+                ConvSC(c1, c2, k, downsampling=True, act_inplace=act_inplace),
+                ConvSC(c2, c2, k, downsampling=False, act_inplace=act_inplace),
+            ),
+            nn.Sequential(
+                ConvSC(c2, c3, k, downsampling=True, act_inplace=act_inplace),
+                ConvSC(c3, c3, k, downsampling=False, act_inplace=act_inplace),
+            ),
+        ])
+
+    def forward(self, x: torch.Tensor):
+        feats = []
+        for stage in self.stages:
+            x = stage(x)
+            feats.append(x)
+        return feats[0], feats[1], feats[2], feats[3]
+
+class Decoder(nn.Module):
+    """Spatial decoder with symmetric upsampling stages and a residual skip."""
+
+    def __init__(
+        self, channels: list, c_out: int, k: int, act_inplace: bool = False
+    ):
+        super().__init__()
+        c0, c1, c2, c3 = channels
+        self.dec = nn.ModuleList([
+            ConvSC(c1, c0, k, upsampling=False, act_inplace=act_inplace),
+            # ConvSC(c2, c3, k, upsampling=True, act_inplace=act_inplace),
+            # ConvSC(c3, c0, k, upsampling=True, act_inplace=act_inplace),
+        ])
+        self.readout = nn.Conv2d(c0, c_out, kernel_size=1)
+
+    def forward(self, z: torch.Tensor):
+        for dec in self.dec:
+            z = dec(z)
+        return self.readout(z)
+
+class RFB_modified(nn.Module):
+    def __init__(self, in_channel, out_channel, downsample=False):
+        super(RFB_modified, self).__init__()
+        self.relu = nn.ReLU(True)
+        self.branch0 = nn.Sequential(
+            BasicConv2d(in_channel, out_channel, 1),
+        )
+        self.branch1 = nn.Sequential(
+            BasicConv2d(in_channel, out_channel, 1),
+            BasicConv2d(out_channel, out_channel, kernel_size=(1, 3), padding=(0, 1)),
+            BasicConv2d(out_channel, out_channel, kernel_size=(3, 1), padding=(1, 0)),
+            BasicConv2d(out_channel, out_channel, 3, padding=3, dilation=3),
+        )
+        self.branch2 = nn.Sequential(
+            BasicConv2d(in_channel, out_channel, 1),
+            BasicConv2d(out_channel, out_channel, kernel_size=(1, 5), padding=(0, 2)),
+            BasicConv2d(out_channel, out_channel, kernel_size=(5, 1), padding=(2, 0)),
+            BasicConv2d(out_channel, out_channel, 3, padding=5, dilation=5),
+        )
+        self.branch3 = nn.Sequential(
+            BasicConv2d(in_channel, out_channel, 1),
+            BasicConv2d(out_channel, out_channel, kernel_size=(1, 7), padding=(0, 3)),
+            BasicConv2d(out_channel, out_channel, kernel_size=(7, 1), padding=(3, 0)),
+            BasicConv2d(out_channel, out_channel, 3, padding=7, dilation=7),
+        )
+        
+        if downsample:
+            self.conv_cat = nn.Sequential(
+                BasicConv2d(4 * out_channel, out_channel, 3, padding=1),
+                BasicConv2d(out_channel, out_channel, stride=2, padding=1),
+                BasicConv2d(out_channel, out_channel, stride=2, padding=1))
+            self.conv_res = nn.Sequential(
+                BasicConv2d(in_channel, out_channel, 3, padding=1),
+                BasicConv2d(out_channel, out_channel, stride=2, padding=1),
+                BasicConv2d(out_channel, out_channel, stride=2, padding=1),
+            )
+        else:
+            self.conv_cat = BasicConv2d(4 * out_channel, out_channel, 3, padding=1)
+            self.conv_res = BasicConv2d(in_channel, out_channel, 1)
+
+    def forward(self, x):
+        x0 = self.branch0(x)
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x3 = self.branch3(x)
+        x_cat = self.conv_cat(torch.cat((x0, x1, x2, x3), 1))
+
+        x = self.relu(x_cat + self.conv_res(x))
+        return x
+
+class ConvBNReLU(nn.Sequential):
+    def __init__(self, in_channels, out_channels, kernel_size=3, dilation=1, stride=1, norm_layer=nn.BatchNorm2d, bias=False):
+        super(ConvBNReLU, self).__init__(
+            nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, bias=bias, dilation=dilation, stride=stride, padding=((stride - 1) + dilation * (kernel_size - 1)) // 2),
+            norm_layer(out_channels),
+            nn.ReLU6(),
+        )
+
+class LayerNorm(nn.Module):
+    r"""LayerNorm that supports two data formats: channels_last (default) or channels_first.
+    The ordering of the dimensions in the inputs. channels_last corresponds to inputs with
+    shape (batch_size, height, width, channels) while channels_first corresponds to inputs
+    with shape (batch_size, channels, height, width).
+    """
+
+    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape), requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(normalized_shape), requires_grad=True)
+        self.eps = eps
+        self.data_format = data_format
+        if self.data_format not in ["channels_last", "channels_first"]:
+            raise ValueError(f"not support data format '{self.data_format}'")
+        self.normalized_shape = (normalized_shape,)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.data_format == "channels_last":
+            return F.layer_norm(
+                x, self.normalized_shape, self.weight, self.bias, self.eps
+            )
+        elif self.data_format == "channels_first":
+            # [batch_size, channels, height, width]
+            mean = x.mean(1, keepdim=True)
+            var = (x - mean).pow(2).mean(1, keepdim=True)
+            x = (x - mean) / torch.sqrt(var + self.eps)
+            x = self.weight[:, None, None] * x + self.bias[:, None, None]
+            return x
+
 class IntraSliceBranch(nn.Module):
     def __init__(self,conv=nn.Conv2d,n_feat=64,kernel_size=3,bias=True,
                  head_num=1,win_num_sqrt=16, image_size=256):
@@ -146,176 +318,85 @@ class IntraSliceBranch(nn.Module):
 
         return x_attn
 
-class I2Block(nn.Module):
-    def __init__(
-        self, conv, n_feat, kernel_size,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16, image_size=256):
-        super(I2Block, self).__init__()
-        inter_slice_branch = [
-            nn.PixelUnshuffle(2),
-            nn.Conv2d(4*n_feat,4*n_feat,3,1,1),
-            nn.ReLU(),
-            nn.Conv2d(4*n_feat,4*n_feat,3,1,1), # +
-            nn.PixelShuffle(2), # +
-            nn.Conv2d(n_feat,n_feat,1,1,0)
-        ]
-        self.inter_slice_branch = nn.Sequential(*inter_slice_branch)
-        self.res_scale = res_scale
+class MMF(nn.Module):
+    def __init__(self, in_ch=96):
+        super(MMF, self).__init__()
 
-        self.intra_slice_branch = IntraSliceBranch(conv=nn.Conv2d,n_feat=n_feat,kernel_size=kernel_size,bias=bias
-                                  ,head_num=head_num,win_num_sqrt=win_num_sqrt, image_size=image_size)
+        self.conv_bn_relu11 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(in_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.conv_bn_relu12 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(in_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.conv_bn_relu21 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(in_ch),
+            nn.ReLU(inplace=True),
+        )
+        self.conv_bn_relu22 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(in_ch),
+            nn.ReLU(inplace=True),
+        )
 
-    def forward(self, x):
-        x_inter = self.inter_slice_branch(x).mul(self.res_scale)
-        x_intra = self.intra_slice_branch(x)
-        out = x_inter + x_intra + x
-        return out
+    def forward(self, x, y):
+        x1 = self.conv_bn_relu11(x)
+        y1 = self.conv_bn_relu12(y)
+        b, c, h, w = x.shape
+        x1 = x1.reshape(b, c, h * w)
+        y1 = y1.reshape(b, c, h * w)
+        similarity = torch.bmm(x1.permute(0, 2, 1), y1)
+        similarity_softmax = torch.nn.functional.softmax(similarity, dim=2)
 
-class I2Group(nn.Module):
-    def __init__(
-        self, conv, n_depth, n_feat, kernel_size,skip_connect=False,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16, image_size=256):
+        output_x1 = torch.bmm(x1, similarity_softmax)
+        output_y1 = torch.bmm(y1, similarity_softmax)
+
+        similarity_sum = similarity.sum(dim=2)
+        similarity_sums_sig = torch.sigmoid(similarity_sum)
+        similarity_sums_sig_expanded = similarity_sums_sig.unsqueeze(1)
+        output_x1 = output_x1 * (1 - similarity_sums_sig_expanded)
+        output_y1 = output_y1 * (1 - similarity_sums_sig_expanded)
+
+        output_x1 = output_x1.reshape(b, c, h, w)
+        output_y1 = output_y1.reshape(b, c, h, w)
+        output_x1 = self.conv_bn_relu21(output_x1)
+        output_y1 = self.conv_bn_relu22(output_y1)
+        output = output_x1 + output_y1 + x + y
+
+        return output
+
+
+class LocalMMF(nn.Module):
+    def __init__(self, in_ch=96, win_size=7):
         super().__init__()
 
-        body = [I2Block(conv, n_feat, kernel_size,
-                            bias, bn, act, res_scale,head_num,win_num_sqrt, image_size) for _ in range(n_depth)]
+        self.win_size = win_size
 
-        self.body = nn.Sequential(*body)
-    def forward(self,x):
-        x_f = self.body(x)
-        out = x_f
-        return out
-
-
-class DWConv(nn.Sequential):
-    def __init__(self,n_feat,expand=1):
-        super().__init__(
-            nn.Conv2d(n_feat,n_feat*expand,1,1,0),
-            nn.Conv2d(n_feat*expand,n_feat*expand,3,1,1,groups=n_feat*expand),
-            nn.Conv2d(n_feat*expand,n_feat,1,1,0)
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, 1, 1), nn.BatchNorm2d(in_ch), nn.ReLU(True)
         )
 
-class CrossViewBlock(nn.Module):
-    def __init__(self,n_feat, image_size):
-        super().__init__()
-        
-        self.image_size = image_size
-
-        self.norm = nn.LayerNorm(n_feat)
-
-        self.conv_sag = nn.Sequential(
-            nn.Conv2d(n_feat,n_feat,1,1,0),
-            Rearrange('b c h w -> b h c w'),
-            nn.PixelShuffle(2),
-            nn.Conv2d(image_size//4, n_feat,3,1,1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat,image_size//4,3,1,1),
-            nn.PixelUnshuffle(2),
-            Rearrange('b h c w -> b c h w'),
-        )
-        
-        self.conv_cor = nn.Sequential(
-            nn.Conv2d(n_feat,n_feat,1,1,0),
-            Rearrange('b c h w -> b w c h'),
-            nn.PixelShuffle(2),
-            nn.Conv2d(image_size//4,n_feat,3,1,1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat,image_size//4,3,1,1),
-            nn.PixelUnshuffle(2),
-            Rearrange('b w c h -> b c h w'),
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, 1, 1), nn.BatchNorm2d(in_ch), nn.ReLU(True)
         )
 
-    def forward(self,x):
-        B,C,H,W = x.shape
-        x = einops.rearrange(x,'b c h w -> b (h w) c')
-        x = self.norm(x)
-        x = einops.rearrange(x,'b (h w) c -> b c h w',h=H,w=W)
+    def forward(self, x, y):
+        B, C, H, W = x.shape
+        x = self.conv1(x)
+        y = self.conv2(y)
 
-        x_sag_f = self.conv_sag(x) # b c h w
-        x_cor_f = self.conv_cor(x) # b c h w
-        x_out = x_cor_f + x_sag_f
-        return x_out
+        k, pad = self.win_size, self.win_size // 2
+        unfold = lambda t: F.unfold(t, k, padding=pad).view(B, C, k * k, H * W)
 
-class I3Net(nn.Module):
-    def __init__(self,args=None,conv=default_conv):
-        super(I3Net, self).__init__()
-        self.args = args
-        n_feats = args.n_feats #64
-        kernel_size = args.kernel_size # 3
-        num_blocks = args.num_blocks # 16
-        act = nn.ReLU(True)
-        res_scale = args.res_scale # 1
-        in_slice = args.lr_slice_patch*1
-        out_slice = args.hr_slice_patch
-        image_size = args.image_size
+        x_patch, y_patch = unfold(x), unfold(y)
+        x_center = x.view(B, C, 1, H * W)
 
-        head_num = args.head_num
-        win_num_sqrt = args.win_num_sqrt
-        self.head = nn.Sequential(conv(in_slice,n_feats,kernel_size),
-                                  nn.ReLU(),
-                                  conv(n_feats,n_feats,kernel_size))
-        
-        modules_body = [
-            I2Group(
-                conv, n_depth=2,n_feat=n_feats, kernel_size=kernel_size, act=act, res_scale=res_scale, 
-                head_num=head_num, win_num_sqrt=win_num_sqrt, image_size=image_size) for _ in range(num_blocks//2)]
-        self.body = nn.ModuleList(modules_body)
-        
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=image_size) for _ in range(3)])
+        attn = torch.softmax((x_center * y_patch).sum(dim=1), dim=1)
+        out_x = (attn.unsqueeze(1) * x_patch).sum(dim=2).view(B, C, H, W)
+        out_y = (attn.unsqueeze(1) * y_patch).sum(dim=2).view(B, C, H, W)
 
-        self.fuse_align = nn.Conv2d(3*n_feats,n_feats,1,1,0)
-
-        modules_tail = [
-            conv(n_feats, n_feats, kernel_size),
-            nn.ReLU(),
-            conv(n_feats,out_slice,kernel_size)]
-        self.tail = nn.Sequential(*modules_tail)
-        
-    def forward(self, x):
-        x = x.permute(0,3,1,2)
-        x = x.contiguous()
-        x_head = self.head(x)
-        res = x_head
-
-        align_list = []
-        res = self.alignment[0](res)+res
-        align_list.append(res)
-
-        for id,layer in enumerate(self.body):
-            res = layer(res)
-            if id in [3,7]:
-                res = self.alignment[id//4+1](res) + res
-                align_list.append(res)
-
-        res = self.fuse_align(torch.cat(align_list,1))
-        
-        res += x_head       
-        
-        out = self.tail(res) # [bz,s,h,w]
-        
-        out[:,::self.args.upscale] = x
-        out = out.permute(0,2,3,1).contiguous()
-       
-        return out
-
-
-if __name__ == '__main__':
-    import argparse
-    args = argparse.Namespace()
-    args.upscale = 2
-    args.n_feats = 64
-    args.kernel_size = 3
-    args.res_scale = 1
-    args.num_blocks = 16
-    args.lr_slice_patch = 4
-    args.hr_slice_patch = (args.lr_slice_patch-1)*args.upscale + 1
-    args.head_num = 1
-    args.win_num_sqrt = 16
-    args.image_size = 32
-
-    gpy_id = 0
-    model = I3Net(args).cuda(gpy_id)
-    x = torch.ones(1,args.image_size,args.image_size,args.lr_slice_patch).cuda(gpy_id)
-    y = torch.ones(1,args.image_size,args.image_size,args.hr_slice_patch).cuda(gpy_id)
-    pred=model(x)
-    print(pred.shape)
+        return out_x + out_y + x + y

@@ -13,7 +13,7 @@ def args_add_additinoal_attr(args,json_path):
 def select_model(args):
     opt_path = f'opt/{args.model}.json'
     args_add_additinoal_attr(args, opt_path)
-    module = import_module(f'model_zoo.{args.model.lower()}.basic_model')
+    module = import_module(f'model_zoo.net')
     model = module.make_model(args)
     return model
 

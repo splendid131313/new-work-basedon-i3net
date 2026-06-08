@@ -83,7 +83,7 @@ class testSet(Dataset):
         # volumeIn = util.crop_center(volumeIn,256,256)
         # volumeIn = util.resize(volumeIn, self.image_size, self.image_size)
         volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
-        volumeIn, vmin, vmax = util.normalize(volumeIn)
+        volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
         volumeIn = volumeIn.astype(np.float32)
         volumeIn=torch.from_numpy(volumeIn) # w,h,s
         

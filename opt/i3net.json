@@ -5,7 +5,7 @@
     "n_feats": 64,
     "num_blocks": 16,
     "res_scale": 1,
-
+    "channels": [64, 128, 320, 512],
 
     "head_num": 1,
     

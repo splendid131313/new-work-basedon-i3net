@@ -28,6 +28,8 @@ torch.manual_seed(GLOBAL_SEED)
 torch.cuda.manual_seed(GLOBAL_SEED)
 torch.cuda.manual_seed_all(GLOBAL_SEED)
 
+wandb_name = args.ckpt_dir
+
 args.ckpt_dir = 'experiments/' + args.ckpt_dir
 os.makedirs(args.ckpt_dir, exist_ok=True)
 
@@ -67,8 +69,8 @@ loss_function = Select_Loss(args).cuda()
 ########################### train ###################################
 # log
 wandb.init(
-    project="i3net_baseline",
-    name="",
+    project="new backbone",
+    name=wandb_name,
     config=args.__dict__,
 )
 
@@ -77,11 +79,15 @@ if args.amp:
     scaler = torch.cuda.amp.GradScaler()
     autocast = torch.cuda.amp.autocast
 
+best_psnr = 0.0
+last_80_start = int(0.8 * args.max_epoch)
+last_99_start = int(0.99 * args.max_epoch)
+
 model.train()
 for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
-    loss_epoch = 0
+    loss_iter_epoch = 0
     psnr_epoch = 0
-    psnr_slice_epoch = 0
+    psnr_pred_epoch = 0
 
     for iter, hr in tqdm(enumerate(dataloader)):
                  
@@ -108,57 +114,61 @@ for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
             loss_iter.backward()
             optimizer.step()
 
-        psnr_volume_iter = []
-        psnr_slice_iter = []
-        pred_slices = [slice_idx for slice_idx in range(gt.shape[3]) if slice_idx % args.upscale != 0]
+        psnr_iter = 0.0
+        psnr_pred_iter = 0.0
         for bz in range(gt.shape[0]):
-            psnr_volume_iter.append(calc_psnr(gt[bz, :, :, :],sr[bz, :, :, :]).item())
-            psnr_slice_bz = []
-            for slice_idx in pred_slices:
-                psnr = calc_psnr(gt[bz, :, :, slice_idx], sr[bz, :, :, slice_idx]).item()
-                psnr_slice_bz.append(psnr)
-            psnr_slice_bz = sum(psnr_slice_bz) / len(psnr_slice_bz)
-            psnr_slice_iter.append(psnr_slice_bz)
-        psnr_volume_iter = sum(psnr_volume_iter) / len(psnr_volume_iter)
-        psnr_slice_iter = sum(psnr_slice_iter) / len(psnr_slice_iter)
+            psnr_iter += calc_psnr(gt[bz, :, :, :], sr[bz, :, :, :]).item()
+            # TODO:
+            # upscale > 2的时候，这里的索引是不合理的
+            psnr_pred_iter += calc_psnr(gt[bz, :, :, 1::args.upscale], sr[bz, :, :, 1::args.upscale]).item()
+        psnr_iter /= gt.shape[0]
+        psnr_pred_iter /= gt.shape[0]
 
+        loss_iter_epoch += loss_iter.detach().item()
+        psnr_epoch += psnr_iter
+        psnr_pred_epoch += psnr_pred_iter
 
         #### log ####    
         lr_tmp = optimizer.state_dict()['param_groups'][0]['lr']
-        log = r"epoch[{}/{}] iter[{}/{}] psnr_volume_Tr:{:.6f} psnr_slice_Tr:{:.6f} lossTr:{:.12f} lr:{:.12f}"\
-            .format(epoch+1, args.max_epoch , \
-                iter+1, len(dataloader),\
-                psnr_volume_iter, psnr_slice_iter, loss_iter, lr_tmp)
+        log = (
+            f"epoch[{epoch + 1}/{args.max_epoch}] "
+            f"iter[{iter + 1}/{len(dataloader)}] "
+            f"psnrTr:{psnr_iter:.6f} psnrPred:{psnr_pred_iter:.6f} lossTr:{loss_iter.item():.12f} lr:{lr_tmp:.12f}"
+        )
         now = str(datetime.datetime.now())
-        print(now+' '+log)
+        print(now + " " + log)
 
-        loss_epoch += loss_iter
-        psnr_epoch += psnr_volume_iter
-        psnr_slice_epoch += psnr_slice_iter
-
-    loss_epoch /= (iter+1)
-    psnr_epoch /= (iter+1)
-    psnr_slice_epoch /= (iter+1)
+    num_batches = len(dataloader)
+    loss_epoch = loss_iter_epoch / num_batches
+    psnr_epoch = psnr_epoch / num_batches
+    psnr_pred_epoch = psnr_pred_epoch / num_batches
 
     with torch.no_grad():
-        clamp_sr = torch.clamp(sr, 0, 1)
-        lr_mid = lr[0, :, :, 1].detach().cpu().float().numpy()
-        sr_mid = clamp_sr[0, :, :, 1].detach().cpu().float().numpy()
-        gt_mid = gt[0, :, :, 1].detach().cpu().float().numpy()
-
+        b, h, w, s = gt.shape
+        mid_s = s // 2
+        sr = torch.clamp(sr, 0, 1)
+        gt = torch.clamp(gt, 0, 1)
+        sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
+        gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
 
         wandb.log(
             {
                 "train/psnr_epoch": psnr_epoch,
-                "train/psnr_slice_epoch": psnr_slice_epoch,
+                "train/psnr_pred_epoch": psnr_pred_epoch,
                 "train/loss_epoch": loss_epoch,
                 "train/lr": lr_tmp,
                 "epoch": epoch,
-                "vis/lr_slice": wandb.Image(lr_mid, caption="LR input"),
                 "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
                 "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
             }
         )
+
+    log = (
+        f"epoch[{epoch + 1}/{args.max_epoch}] "
+        f"psnrTr:{psnr_epoch:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+    )
+    now = str(datetime.datetime.now())
+    print(now + " " + log)
 
     #### lr schedule ####
     if args.schedule == 'step':
@@ -173,25 +183,22 @@ for epoch in tqdm(range(args.start_epoch,args.max_epoch)):
     elif args.schedule == 'Tmax':
         scheduler.step(psnr_epoch)
 
-    epoch +=1
+    os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
 
-    log = r"epoch[{}/{}] psnrTr:{:.6f} psnr_slice_Tr:{:.6f} lossTr:{:.12f} lr:{:.12f}"\
-    .format(epoch, args.max_epoch , \
-        psnr_epoch, psnr_slice_epoch, loss_epoch, lr_tmp)
-    now = str(datetime.datetime.now())
-    print(now+' '+log)
-    # with open(args.ckpt_dir + '/logs.txt',mode='a+') as f:
-    #     f.write('\n'+now+log)
+    if epoch + 1 > last_80_start and psnr_epoch > best_psnr:
+        best_psnr = psnr_epoch
+        state_dict = model.state_dict()
+        torch.save(
+            state_dict,
+            args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
+        )
+        print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
 
-    if epoch >int(0.99*args.max_epoch):
-        os.makedirs(args.ckpt_dir+'/pth',exist_ok=True)
-        try:
-            torch.save({'epoch': epoch, 'state_dict': model.module.state_dict()}, args.ckpt_dir + '/pth/' + str(epoch).zfill(4) + '.pth')
-        except:
-            torch.save({'epoch': epoch, 'state_dict': model.state_dict()}, args.ckpt_dir + '/pth/' + str(epoch).zfill(4) + '.pth')
+    if epoch + 1 > last_99_start:
+        state_dict = model.state_dict()
+        torch.save(state_dict,
+                    args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
+                )
+
 
 wandb.finish()
-
-# val_opt = True
-# if val_opt:
-#     val.val(args=args,model=model)
