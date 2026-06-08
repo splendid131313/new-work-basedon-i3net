@@ -1,2 +1,1 @@
-I3NET原模型 经过本地化数据处理
-only for 256
+brand new backbone. 性能很差
