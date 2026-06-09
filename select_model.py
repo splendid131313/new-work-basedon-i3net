@@ -4,7 +4,6 @@ import torch.nn as nn
 import json
 from importlib import import_module
 
-# dav2 (Depth Anything V2) 始终冻结；以下为可独立解冻的 FlowSeek 子模块
 FLOWSEEK_TRAINABLE_PREFIXES = (
     "merge_head",   # 深度特征 -> 光流特征
     "cnet",         # 双帧 context 编码
@@ -16,22 +15,12 @@ FLOWSEEK_TRAINABLE_PREFIXES = (
     "update_block", # 迭代更新 (参数量中等)
 )
 
-# 预设模式: 从轻到重, 显存/参数量递增
 FLOWSEEK_FINETUNE_MODES = {
     "frozen": [],
-    "merge_head": ["merge_head"],
-    "heads": ["merge_head", "init_conv", "flow_head", "upsample_weight"],
     "adapter": ["merge_head", "bnet", "init_conv"],
-    "lite": [
-        "merge_head", "cnet", "bnet", "init_conv", "flow_head", "upsample_weight"
-    ],
-    "refine": [
-        "merge_head", "bnet", "init_conv", "flow_head", "upsample_weight", "update_block"
-    ],
-    "feature": ["merge_head", "fnet"],
+    "refine": ["merge_head", "bnet", "init_conv", "flow_head", "upsample_weight", "update_block"],
     "full": list(FLOWSEEK_TRAINABLE_PREFIXES),
 }
-
 
 def load_flowseek_ckpt(args):
     ckpt = torch.load(args.flow_ckpt, map_location="cpu")
@@ -58,7 +47,7 @@ def args_add_additional_attr(args, json_path):
 
 
 def resolve_flowseek_train_prefixes(args):
-    mode = getattr(args, "flowseek_finetune_mode", "lite").strip().lower()
+    mode = getattr(args, "flowseek_finetune_mode", "refine").strip().lower()
    
     if mode not in FLOWSEEK_FINETUNE_MODES:
         raise ValueError(f"wrong flowseek_finetune_mode!!")

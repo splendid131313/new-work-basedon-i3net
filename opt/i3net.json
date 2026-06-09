@@ -6,6 +6,7 @@
     "res_scale": 1,
     "head_num": 1,
     "i_num_blocks": 16,
+    "channels": [64, 128, 320, 512],
 
     "win_num_sqrt":16
 }

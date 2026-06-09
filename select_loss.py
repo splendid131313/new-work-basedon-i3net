@@ -161,8 +161,10 @@ class LapLoss(torch.nn.Module):
     def __init__(self, max_levels=3, channels=7, weights=[1.0, 0.5, 0.25], device=None):
         super(LapLoss, self).__init__()
         self.max_levels = max_levels
-        self.gauss_kernel = gauss_kernel(channels=channels, device=device)
         self.weights = weights
+        self.register_buffer(
+            "gauss_kernel", gauss_kernel(channels=channels, device=device)
+        )
 
     def forward(self, input, target):
         loss = 0.0
@@ -214,6 +216,40 @@ class GradientLoss(nn.Module):
         loss_y = F.l1_loss(pred_grad_y, target_grad_y)
         return loss_x + loss_y
 
+class TissueVarianceLoss(nn.Module):
+    def __init__(self, win_size=7, eps=1e-4, upscale=2):
+        super().__init__()
+
+        self.win_size = win_size
+        self.eps = eps
+        self.upscale = upscale
+
+    def local_std(self, x):
+
+        mean = F.avg_pool2d(x, self.win_size, stride=1, padding=self.win_size // 2)
+        mean_sq = F.avg_pool2d(x * x, self.win_size, stride=1, padding=self.win_size // 2)
+        var = F.relu(mean_sq - mean * mean)
+
+        return var
+
+    def _interp_slice_indices(self, num_slices):
+        return [i for i in range(num_slices) if i % self.upscale != 0]
+
+    def forward(self, pred, gt):
+        with autocast(enabled=False):
+            pred = pred.float().permute(0, 3, 1, 2).contiguous()
+            gt = gt.float().permute(0, 3, 1, 2).contiguous()
+
+            interp_idx = self._interp_slice_indices(pred.shape[1])
+            if not interp_idx:
+                return pred.sum() * 0.0
+
+            pred_var = self.local_std(pred[:, interp_idx])
+            gt_var = self.local_std(gt[:, interp_idx]).detach()
+
+            loss = F.l1_loss(pred_var, gt_var)
+
+        return loss
 
 class TotalLoss(nn.Module):
     def __init__(self, args, device=None):
@@ -222,13 +258,13 @@ class TotalLoss(nn.Module):
         self.lambda_l1 = args.lambda_l1
         self.lambda_lap = args.lambda_lap
         self.lambda_gra = args.lambda_gra
-        self.lambda_ssim = args.lambda_ssim
-        
+        self.lambda_tissue = args.lambda_tissue
+
         self.l1 = nn.L1Loss()
         self.lap_loss = LapLoss(channels=args.hr_slice_patch, device=device)
         self.grad_loss = GradientLoss()
-        self.ssim = SSIM()
-        
+        self.tissue = TissueVarianceLoss(upscale=args.upscale)
+
 
     def forward(self, pred, target):
         with autocast(enabled=False):
@@ -238,5 +274,5 @@ class TotalLoss(nn.Module):
             l1 = self.l1(pred, target) * self.lambda_l1
             freq = self.lap_loss(pred, target) * self.lambda_lap
             grad = self.grad_loss(pred, target) * self.lambda_gra
-            ssim_loss = self.ssim(pred, target) * self.lambda_ssim
-            return l1 + freq + grad + ssim_loss
+            tissue = self.tissue(pred, target) * self.lambda_tissue
+            return l1 + freq + grad + tissue

@@ -35,7 +35,7 @@ def select_scheduler(opt,optimizer):
         #                                                eta_min=opt.lr / opt.lr_gap)
         scheduler = CosineLRScheduler(optimizer,
                                       t_initial=opt.max_epoch,
-                                      lr_min=opt.lr/10,
+                                      lr_min=opt.lr/50,
                                       warmup_lr_init=opt.lr/100,
                                       warmup_t=int(opt.max_epoch * opt.warmup_epoch),
                                       cycle_limit=1,

@@ -1,19 +1,19 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, I2Group, CrossViewBlock
+from .i3net.basic_model import default_conv, I2Group, CrossViewBlock, ConvSC, LocalMMF
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
 
-# from i3net.basic_model import default_conv, I2Group, CrossViewBlock
+# from i3net.basic_model import default_conv, I2Group, CrossViewBlock, ConvSC, LocalMMF
 # from flowseek.core.flowseek import FlowSeek
 # from i3net.flow_module import warp
 
 def make_model(args):
-    return I3Net(args)
+    return Net(args)
 
-class I3Net(nn.Module):
+class Net(nn.Module):
     def __init__(self, args=None, conv=default_conv):
-        super(I3Net, self).__init__()
+        super(Net, self).__init__()
         self.args = args
         n_feats = args.n_feats  # 64
         kernel_size = args.kernel_size  # 3
@@ -23,6 +23,7 @@ class I3Net(nn.Module):
         in_slice = args.lr_slice_patch * 1
         out_slice = args.hr_slice_patch
         self.time_list = args.lr_time_list[1:-1]
+        channels = args.channels
 
         head_num = args.head_num
         win_num_sqrt = args.win_num_sqrt
@@ -32,6 +33,7 @@ class I3Net(nn.Module):
             nn.ReLU(),
             conv(n_feats, n_feats, kernel_size),
         )
+        # self.encoder = SliceEncoder(2 * out_slice, channels, kernel_size, act_inplace=False)
         self.flowseek = FlowSeek(args)
 
         modules_body = [
@@ -53,6 +55,9 @@ class I3Net(nn.Module):
         self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
 
         self.fuse_align = nn.Conv2d(3 * n_feats, n_feats, 1, 1, 0)
+
+        self.align_local = nn.ModuleList([LocalMMF(in_ch=n_feats, win_size=3) for _ in range(2)])
+        # self.align = LocalMMF(in_ch=n_feats, win_size=5)
 
         modules_tail = [
             conv(n_feats, n_feats, kernel_size),
@@ -117,13 +122,12 @@ class I3Net(nn.Module):
         i_start = x[:, :-1, :, :]
         i_end = x[:, 1:, :, :]
         
-        # B, T, H, W = x.shape
         warped0, warped1, flow_list = self._get_align(i_start, i_end)
 
         align_input = torch.cat([x, warped0, warped1], 1)
-        x_head = self.head(align_input)
+        x1 = self.head(align_input)
 
-        res = x_head
+        res = x1
 
         align_list = []
         res = self.alignment[0](res) + res
@@ -133,16 +137,17 @@ class I3Net(nn.Module):
             res = layer(res)
             if id in [3, 7]:
                 res = self.alignment[id // 4 + 1](res) + res
+                res = self.align_local[id // 4](res, x1) + res
                 align_list.append(res)
 
         res = self.fuse_align(torch.cat(align_list, 1))
 
-        res += x_head
+        # align = self.align(res, x1)
 
         raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
 
         mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
-        delta = raw_output[:, self.args.hr_slice_patch :, :, :]
+        delta = torch.tanh(raw_output[:, self.args.hr_slice_patch :, :, :]) * 0.1
 
         out = mask * warped0 + (1 - mask) * warped1 + delta
 
@@ -172,10 +177,10 @@ if __name__ == "__main__":
     args.head_num = 1
     args.win_num_sqrt = 16
     args.image_size = 256
-    args.lr_time_list = [0, 0.3, 0.6, 1]
+    args.channels = [64, 128, 320, 512]
 
     gpy_id = 0
-    model = I3Net(args).cuda(gpy_id)
+    model = Net(args).cuda(gpy_id)
     x = torch.ones(1, args.image_size, args.image_size, args.lr_slice_patch).cuda(gpy_id)
     y = torch.ones(1, args.image_size, args.image_size, args.hr_slice_patch).cuda(gpy_id)
     pred = model(x)

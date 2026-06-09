@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import Select_Loss
+from select_loss import TotalLoss
 
 
 def main():
@@ -87,7 +87,7 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = Select_Loss(args).to(device)
+    loss_function = TotalLoss(args, device=device).to(device)
 
     if is_main:
         wandb.init(
@@ -137,14 +137,15 @@ def main():
 
             if use_amp:
                 with autocast():
-                    sr, flow_list = model(lr)
+                    sr, flow = model(lr)
+                with autocast(enabled=False):
                     loss_iter = loss_function(sr, gt)
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                sr, flow_list = model(lr)
+                sr, flow = model(lr)
                 loss_iter = loss_function(sr, gt)
                 loss = loss_iter
                 loss.backward()
@@ -243,8 +244,8 @@ def main():
             if epoch + 1 > last_99_start:
                 state_dict = model.module.state_dict()
                 torch.save(state_dict,
-                    args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
-                )
+                           args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
+                           )
 
     if is_main:
         wandb.finish()

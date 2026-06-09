@@ -1,8 +1,10 @@
 import torch.nn as nn
+import torch
 import einops
 from functools import partial
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
+from timm.models.layers import DropPath, trunc_normal_
 
 from .dct_util import DCT2x,IDCT2x
 
@@ -90,6 +92,121 @@ class GDFN(nn.Module):
         x1, x2 = self.conv(self.project_in(x)).chunk(2, dim=1)
         x = self.project_out(F.gelu(x1) * x2)
         return x
+
+
+class BasicConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, dilation=1, upsampling=False,
+                 act_norm=False, act_inplace=True, ):
+        super(BasicConv2d, self).__init__()
+        self.act_norm = act_norm
+        if upsampling is True:
+            self.conv = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * 4, kernel_size=kernel_size, stride=1, padding=padding,
+                          dilation=dilation),
+                nn.PixelShuffle(2)
+            )
+        else:
+            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding,
+                                  dilation=dilation)
+
+        self.norm = nn.GroupNorm(2, out_channels)
+        self.act = nn.SiLU(inplace=act_inplace)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d)):
+            trunc_normal_(m.weight, std=0.02)
+            nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        y = self.conv(x)
+        if self.act_norm:
+            y = self.act(self.norm(y))
+
+        return y
+
+
+class ConvSC(nn.Module):
+    def __init__(self, C_in, C_out, kernel_size=3, downsampling=False, upsampling=False, act_norm=True,
+                 act_inplace=True, ):
+        super(ConvSC, self).__init__()
+
+        stride = 2 if downsampling is True else 1
+        padding = (kernel_size - stride + 1) // 2
+
+        self.conv = BasicConv2d(C_in, C_out, kernel_size=kernel_size, stride=stride, upsampling=upsampling,
+                                padding=padding, act_norm=act_norm, act_inplace=act_inplace)
+
+    def forward(self, x):
+        y = self.conv(x)
+        return y
+
+
+class SliceEncoder(nn.Module):
+    """Multi-scale encoder for slice input; outputs align with net downsample stages."""
+
+    def __init__(self, c_in: int, channels, k: int = 3, act_inplace: bool = False):
+        super().__init__()
+        c0, c1, c2, c3 = channels
+        self.stages = nn.ModuleList(
+            [
+                nn.Sequential(
+                    ConvSC(c_in, c0, k, downsampling=False, act_inplace=act_inplace),
+                ),
+                nn.Sequential(
+                    ConvSC(c0, c1, k, downsampling=True, act_inplace=act_inplace),
+                    ConvSC(c1, c1, k, downsampling=False, act_inplace=act_inplace),
+                ),
+                nn.Sequential(
+                    ConvSC(c1, c2, k, downsampling=True, act_inplace=act_inplace),
+                    ConvSC(c2, c2, k, downsampling=False, act_inplace=act_inplace),
+                ),
+                nn.Sequential(
+                    ConvSC(c2, c3, k, downsampling=True, act_inplace=act_inplace),
+                    ConvSC(c3, c3, k, downsampling=False, act_inplace=act_inplace),
+                ),
+            ]
+        )
+
+    def forward(self, x: torch.Tensor):
+        feats = []
+        for stage in self.stages:
+            x = stage(x)
+            feats.append(x)
+        return feats[0], feats[1], feats[2], feats[3]
+
+
+class LocalMMF(nn.Module):
+    def __init__(self, in_ch=96, win_size=7):
+        super().__init__()
+
+        self.win_size = win_size
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, 1, 1), nn.BatchNorm2d(in_ch), nn.ReLU(True)
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, 3, 1, 1), nn.BatchNorm2d(in_ch), nn.ReLU(True)
+        )
+
+    def forward(self, x, y):
+        B, C, H, W = x.shape
+        x = self.conv1(x)
+        y = self.conv2(y)
+
+        k, pad = self.win_size, self.win_size // 2
+        unfold = lambda t: F.unfold(t, k, padding=pad).view(B, C, k * k, H * W)
+
+        x_patch, y_patch = unfold(x), unfold(y)
+        x_center = x.view(B, C, 1, H * W)
+
+        attn = torch.softmax((x_center * y_patch).sum(dim=1), dim=1)
+        out_x = (attn.unsqueeze(1) * x_patch).sum(dim=2).view(B, C, H, W)
+        out_y = (attn.unsqueeze(1) * y_patch).sum(dim=2).view(B, C, H, W)
+
+        return out_x + out_y + x + y
 
 
 #####################################################################
