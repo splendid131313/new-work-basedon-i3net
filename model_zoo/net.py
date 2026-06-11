@@ -29,7 +29,7 @@ class Net(nn.Module):
         win_num_sqrt = args.win_num_sqrt
         window_size = args.image_size // args.win_num_sqrt
         self.head = nn.Sequential(
-            conv(in_slice + 2 * out_slice, n_feats, kernel_size),
+            ConvSC(2 * out_slice, n_feats, kernel_size),
             nn.ReLU(),
             conv(n_feats, n_feats, kernel_size),
         )
@@ -56,11 +56,11 @@ class Net(nn.Module):
 
         self.fuse_align = nn.Conv2d(3 * n_feats, n_feats, 1, 1, 0)
 
-        self.align_local = nn.ModuleList([LocalMMF(in_ch=n_feats, win_size=3) for _ in range(2)])
-        # self.align = LocalMMF(in_ch=n_feats, win_size=5)
+        # self.align_local = nn.ModuleList([LocalMMF(in_ch=n_feats, win_size=3) for _ in range(2)])
+        self.align = LocalMMF(in_ch=n_feats, win_size=5)
 
         modules_tail = [
-            conv(n_feats, n_feats, kernel_size),
+            ConvSC(n_feats, n_feats, kernel_size),
             nn.ReLU(),
             conv(n_feats, out_slice * 2, kernel_size),
         ]
@@ -117,6 +117,69 @@ class Net(nn.Module):
 
         return w0_seq, w1_seq, flow_list
 
+    def forward_with_vis(self, x):
+        """前向推理并返回中间特征，供 visualize_features.py 使用。"""
+        x = x.permute(0, 3, 1, 2).contiguous()
+        i_start = x[:, :-1, :, :]
+        i_end = x[:, 1:, :, :]
+
+        warped0, warped1, flow_list = self._get_align(i_start, i_end)
+
+        align_input = torch.cat([warped0, warped1], 1)
+        x1 = self.head(align_input)
+
+        res = x1
+        align_list = []
+        alignment_out = []
+        alignment_res = []
+        body_out = []
+
+        a0 = self.alignment[0](res)
+        alignment_out.append(a0)
+        res = a0 + res
+        alignment_res.append(res)
+        align_list.append(res)
+
+        for id, layer in enumerate(self.body):
+            res = layer(res)
+            body_out.append(res)
+            if id in [3, 7]:
+                ai = id // 4
+                a_out = self.alignment[ai + 1](res)
+                alignment_out.append(a_out)
+                res = a_out + res
+                alignment_res.append(res)
+                align_list.append(res)
+
+        fuse_align = self.fuse_align(torch.cat(align_list, 1))
+        align_out = self.align(fuse_align, x1)
+
+        raw_output = self.tail(align_out)
+        mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
+        delta = torch.tanh(raw_output[:, self.args.hr_slice_patch :, :, :]) * 0.1
+        out = mask * warped0 + (1 - mask) * warped1 + delta
+        out[:, :: self.args.upscale] = x
+        out = out.permute(0, 2, 3, 1).contiguous()
+
+        vis = {
+            "lr_input": x,
+            "warped0": warped0,
+            "warped1": warped1,
+            "flow_list": flow_list,
+            "head": x1,
+            "alignment_out": alignment_out,
+            "alignment_res": alignment_res,
+            "body_out": body_out,
+            "fuse_align": fuse_align,
+            "align_out": align_out,
+            "before_tail": align_out,
+            "raw_tail": raw_output,
+            "mask": mask,
+            "delta": delta,
+            "fused": mask * warped0 + (1 - mask) * warped1 + delta,
+        }
+        return out, vis
+
     def forward(self, x):
         x = x.permute(0, 3, 1, 2).contiguous()
         i_start = x[:, :-1, :, :]
@@ -124,7 +187,7 @@ class Net(nn.Module):
         
         warped0, warped1, flow_list = self._get_align(i_start, i_end)
 
-        align_input = torch.cat([x, warped0, warped1], 1)
+        align_input = torch.cat([warped0, warped1], 1)
         x1 = self.head(align_input)
 
         res = x1
@@ -137,17 +200,16 @@ class Net(nn.Module):
             res = layer(res)
             if id in [3, 7]:
                 res = self.alignment[id // 4 + 1](res) + res
-                res = self.align_local[id // 4](res, x1) + res
                 align_list.append(res)
 
         res = self.fuse_align(torch.cat(align_list, 1))
 
-        # align = self.align(res, x1)
+        align = self.align(res, x1)
 
-        raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
+        raw_output = self.tail(align)  # [B, out_slice * 2, H, W]
 
         mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
-        delta = torch.tanh(raw_output[:, self.args.hr_slice_patch :, :, :]) * 0.1
+        delta = raw_output[:, self.args.hr_slice_patch :, :, :]
 
         out = mask * warped0 + (1 - mask) * warped1 + delta
 
