@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
-# from .i3net.basic_model import default_conv, CrossViewBlock
-# from .i3net.pfg import MidPFG, Encoder, Decoder
-# from .flowseek.core.flowseek import FlowSeek
-# from .i3net.flow_module import warp
+from .i3net.basic_model import default_conv, CrossViewBlock
+from .i3net.pfg import MidPFG, Encoder, Decoder
+from .flowseek.core.flowseek import FlowSeek
+from .i3net.flow_module import warp
 
-from i3net.basic_model import default_conv, CrossViewBlock
-from i3net.pfg import MidPFG, Encoder, Decoder
-from flowseek.core.flowseek import FlowSeek
-from i3net.flow_module import warp
+# from i3net.basic_model import default_conv, CrossViewBlock
+# from i3net.pfg import MidPFG, Encoder, Decoder
+# from flowseek.core.flowseek import FlowSeek
+# from i3net.flow_module import warp
 
 def make_model(args):
     return I3Net(args)
@@ -27,7 +27,7 @@ class I3Net(nn.Module):
         self.time_list = args.lr_time_list[1:-1]
 
         
-        self.encoder = Encoder(c_in=1, c_hid=n_feats, n_s=4, k=kernel_size, act_inplace=False)
+        self.encoder = Encoder(c_in=3, c_hid=n_feats, n_s=4, k=kernel_size, act_inplace=False)
         self.decoder = Decoder(c_hid=n_feats, c_out=1, n_s=4, k=kernel_size, act_inplace=False)
         self.flowseek = FlowSeek(args)
         self.hid = MidPFG(in_ch=out_slice * n_feats, depth=num_blocks, groups_pw=1, layerscale_init=1e-6, cel_k=(3, 5, 7), drop=0.0, drop_path=0.0, pfga_K=(9, 15, 31))
@@ -96,7 +96,9 @@ class I3Net(nn.Module):
         warped0, warped1 = self._get_align(i_start, i_end)
         B, T, H, W = warped0.shape
 
-        x0 = warped0.view(B * T, -1, H, W)
+        w0 = warped0.view(B * T, -1, H, W)
+        w1 = warped1.view(B * T, -1, H, W)
+        x0 = torch.cat([w0, w1, w0 - w1], dim=1)
         embed, skip = self.encoder(x0)
         _, c2, h2, w2 = embed.shape
         z = embed.view(B, T, c2, h2, w2)
@@ -106,11 +108,6 @@ class I3Net(nn.Module):
 
         y = self.decoder(hid, skip)
         y = y.view(-1, T, H, W)
-
-        # y[:, :: self.args.upscale] = x
-        # y = y.permute(0, 2, 3, 1).contiguous()
-        #
-        # return y
 
         raw_output = self.tail(y)
         mask = torch.sigmoid(raw_output[:, :self.args.hr_slice_patch, :, :])

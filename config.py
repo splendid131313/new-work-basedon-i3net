@@ -16,7 +16,7 @@ def add_argument_group(name):
 data_arg = add_argument_group('Dataset')
 data_arg.add_argument('--data_type', type=str, default='direct')
 data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
-data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/train')
+data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task06_Lung/train')
 data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
 data_arg.add_argument('--image_size', type=int, default=256)
 
@@ -34,8 +34,8 @@ model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/we
 # Training / test parameters
 learn_arg = add_argument_group('Learning')
 #### optim ####
-learn_arg.add_argument('--optim', type=str, default='Adam')
-learn_arg.add_argument('--lr', type=float, default=1e-3)
+learn_arg.add_argument('--optim', type=str, default='Adam') 
+learn_arg.add_argument('--lr', type=float, default=(3e-4)) # 0.0003
 learn_arg.add_argument('--wd', type=float, default=(1e-4), help='weight decay')
 learn_arg.add_argument('--beta1', type=float, default=0.9, help='Adam-beta1')
 learn_arg.add_argument('--beta2', type=float, default=0.999, help='Adam-beta2')
@@ -44,24 +44,24 @@ learn_arg.add_argument('--flood', type=bool, default=False)
 #### schedule ####
 learn_arg.add_argument('--schedule', type=str, default='cos_lr', help='step/cos_lr/Tmax/Tmin') 
 learn_arg.add_argument('--lr_decay', type=int, default=400)
-learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度 (step 用)')
-learn_arg.add_argument('--lr_k_decay', type=float, default=1.0, help='cos_lr: k-decay 系数 (1.0 为标准余弦)')
-learn_arg.add_argument('--warmup_lr', type=float, default=1e-5, help='cos_lr: warmup 起始学习率')
-learn_arg.add_argument('--min_lr', type=float, default=1e-6, help='cos_lr: 余弦下界')
-learn_arg.add_argument('--warmup_epoch', type=int, default=0, help='cos_lr: warmup 轮数（按 epoch）')
-learn_arg.add_argument('--patience', type=int, default=10, help='ReduceLROnPlateau (Tmin/Tmax)')
+learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度')
 #### epoch/bs ####
 learn_arg.add_argument('--batch_size', type=int, default=6)
 learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapling n times of each volume')
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
-# learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
-
+learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
+#### loss ####
+learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
+learn_arg.add_argument('--lambda_mse', type=float, default=1.0, help='PFG-style MSE loss weight')
+learn_arg.add_argument('--lambda_lap', type=float, default=0.0)
+learn_arg.add_argument('--lambda_gra', type=float, default=0.0)
+learn_arg.add_argument('--lambda_tissue', type=float, default=0.0)
 
 # Misc
 misc_arg = add_argument_group('Misc')
-misc_arg.add_argument('--ckpt_dir', type=str, default='colon',help='saved filename')
-misc_arg.add_argument('--gpu_id', type=str, default='0,1')
+misc_arg.add_argument('--ckpt_dir', type=str, default='loss',help='saved filename')
+misc_arg.add_argument('--gpu_id', type=str, default='1')
 misc_arg.add_argument('--num_workers', type=int, default=8)
 misc_arg.add_argument('--parallel', type=bool, default=True, help="parallel training")
 misc_arg.add_argument("--local_rank", default=os.getenv('LOCAL_RANK', 0), type=int)
@@ -79,6 +79,5 @@ def get_args():
     
     args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
     args.lr_time_list = torch.linspace(0, 1, args.upscale - 1 + 2)
-    # args.hr_time_list = torch.linspace(0, 1, args.hr_slice_patch)
     return args, unparsed
 

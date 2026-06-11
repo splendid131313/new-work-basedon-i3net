@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import compute_reprojection_loss, Select_Loss
+from select_loss import TotalLoss
 
 
 def main():
@@ -44,6 +44,8 @@ def main():
     torch.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
+
+    wandb_name = args.ckpt_dir
 
     args.ckpt_dir = "experiments/" + args.ckpt_dir
     if is_main:
@@ -85,14 +87,14 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = Select_Loss(args)
+    loss_function = TotalLoss(args).to(device)
 
-    # if is_main:
-    #     wandb.init(
-    #         project="i3net",
-    #         name="flow_module",
-    #         config=args.__dict__,
-    #     )
+    if is_main:
+        wandb.init(
+            project="PFG Modules",
+            name=wandb_name,
+            config=args.__dict__,
+        )
 
     # amp
     use_amp = args.amp
@@ -102,6 +104,10 @@ def main():
     else:
         scaler = None
         autocast = None
+
+    best_psnr = 0.0
+    last_80_start = int(0.8 * args.max_epoch)
+    last_99_start = int(0.99 * args.max_epoch)
 
     model.train()
     for epoch in range(args.start_epoch, args.max_epoch):
@@ -187,7 +193,7 @@ def main():
         if args.schedule == "step":
             scheduler.step()
         elif args.schedule == "cos_lr":
-            scheduler.step(epoch)
+            scheduler.step_update(epoch)
         elif args.schedule == "Tmin":
             scheduler.step(loss_epoch)
         elif args.schedule == "Tmax":
@@ -199,25 +205,22 @@ def main():
             with torch.no_grad():
                 b, h, w, s = gt.shape
                 mid_s = s // 2
-                lr = torch.clamp(lr, 0, 1)
                 sr = torch.clamp(sr, 0, 1)
                 gt = torch.clamp(gt, 0, 1)
-                lr_mid = lr[0, :, :, lr.shape[3] // 2].detach().cpu().float().numpy()
                 sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
                 gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
 
-                # wandb.log(
-                #     {
-                #         "train/psnr_epoch": psnr_epoch,
-                #         "train/psnr_pred_epoch": psnr_pred_epoch,
-                #         "train/loss_epoch": loss_iter_epoch,
-                #         "train/lr": lr_tmp,
-                #         "epoch": epoch,
-                #         "vis/lr_slice": wandb.Image(lr_mid, caption="LR input"),
-                #         "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
-                #         "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
-                #     }
-                # )
+                wandb.log(
+                    {
+                        "train/psnr_epoch": psnr_epoch,
+                        "train/psnr_pred_epoch": psnr_pred_epoch,
+                        "train/loss_epoch": loss_iter_epoch,
+                        "train/lr": lr_tmp,
+                        "epoch": epoch,
+                        "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
+                        "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
+                    },
+                )
 
             log = (
                 f"epoch[{epoch + 1}/{args.max_epoch}] "
@@ -226,16 +229,25 @@ def main():
             now = str(datetime.datetime.now())
             print(now + " " + log)
 
-            if epoch + 1 > int(0.99 * args.max_epoch):
-                os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
-                state_dict = model.module.state_dict()  # DDP
-                torch.save(
-                    {"epoch": epoch + 1, "state_dict": state_dict},
-                    args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
-                )
+            os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
 
-    # if is_main:
-    #     wandb.finish()
+            if epoch + 1 > last_80_start and psnr_epoch > best_psnr:
+                best_psnr = psnr_epoch
+                state_dict = model.module.state_dict()
+                torch.save(
+                    state_dict,
+                    args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
+                )
+                print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
+
+            if epoch + 1 > last_99_start:
+                state_dict = model.module.state_dict()
+                torch.save(state_dict,
+                           args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
+                           )
+
+    if is_main:
+        wandb.finish()
 
     dist.destroy_process_group()
 
