@@ -88,6 +88,135 @@ class I3Net(nn.Module):
 
         return w0_seq, w1_seq
 
+    def _get_align_with_vis(self, i_start, i_end):
+        """与 _get_align 相同，额外返回每对相邻 LR 切片的光流。"""
+        self.flowseek.eval()
+        B, T, H, W = i_start.shape
+
+        w0_seq = torch.zeros((B, self.args.hr_slice_patch, H, W), device=i_start.device)
+        w1_seq = torch.zeros((B, self.args.hr_slice_patch, H, W), device=i_start.device)
+        flow01_list, flow10_list = [], []
+
+        for i in range(self.args.lr_slice_patch):
+            idx = i * self.args.upscale
+            w0_seq[:, idx, :, :] = (
+                i_start[:, i, :, :] if i < i_start.shape[1] else i_end[:, -1, :, :]
+            )
+            w1_seq[:, idx, :, :] = w0_seq[:, idx, :, :]
+
+        for i in range(T):
+            img0 = i_start[:, i, :, :]
+            img1 = i_end[:, i, :, :]
+            img0_rgb = self._vol_to_flowseek_rgb(img0)
+            img1_rgb = self._vol_to_flowseek_rgb(img1)
+
+            with torch.no_grad():
+                flow01 = self.flowseek(img0_rgb, img1_rgb, test_mode=True)["final"]
+                flow10 = self.flowseek(img1_rgb, img0_rgb, test_mode=True)["final"]
+            flow01_list.append(flow01)
+            flow10_list.append(flow10)
+
+            for j in range(1, self.args.upscale):
+                time = j / self.args.upscale
+                curr_idx = i * self.args.upscale + j
+                img0t = warp(img0_rgb, -flow01 * time)
+                imgt1 = warp(img1_rgb, -flow10 * (1 - time))
+                w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
+                w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
+
+        return w0_seq, w1_seq, flow01_list, flow10_list
+
+    def forward_with_vis(self, x):
+        """前向推理并返回中间特征，供可视化脚本使用。"""
+        x = x.permute(0, 3, 1, 2).contiguous()
+        i_start = x[:, :-1, :, :]
+        i_end = x[:, 1:, :, :]
+
+        warped0, warped1, flow01_list, flow10_list = self._get_align_with_vis(
+            i_start, i_end
+        )
+        B, T, H, W = warped0.shape
+
+        w0 = warped0.view(B * T, 1, H, W)
+        w1 = warped1.view(B * T, 1, H, W)
+        enc_in = torch.cat([w0, w1, w0 - w1], dim=1)
+        embed, skip = self.encoder(enc_in)
+        _, c2, h2, w2 = embed.shape
+        z = embed.view(B, T, c2, h2, w2)
+
+        b, t, c, h, w = z.shape
+        x_hid = z.view(b, t * c, h, w)
+        freq_shallow_feat = self.hid.cel(x_hid)
+        first_blk = self.hid.blocks[0]
+        z_shallow_bt = freq_shallow_feat.view(b * t, c, h, w)
+        # _freq_maps 支持任意 C；norm_dw 需要 T*C 通道，故可视化时跳过 norm
+        freq_shallow_maps = torch.cat(
+            [first_blk.tm._freq_maps(z_shallow_bt[i : i + 1]) for i in range(b * t)],
+            dim=0,
+        )
+
+        x_blk = freq_shallow_feat
+        x_pre_last = x_blk
+        for i, blk in enumerate(self.hid.blocks):
+            if i == len(self.hid.blocks) - 1:
+                x_pre_last = x_blk
+            x_blk = blk(x_blk)
+        freq_deep_feat = x_blk
+        z = freq_deep_feat.view(b, t, c, h, w)
+        z_pre_last_bt = x_pre_last.view(b * t, c, h, w)
+        last_blk = self.hid.blocks[-1]
+        freq_deep_maps = torch.cat(
+            [last_blk.tm._freq_maps(z_pre_last_bt[i : i + 1]) for i in range(b * t)],
+            dim=0,
+        )
+
+        freq_shallow_feat = z_shallow_bt
+        freq_deep_feat = z.reshape(b * t, c, h, w)
+
+        hid = z.reshape(B * T, c2, h2, w2)
+        dec_z = hid
+        n_dec = len(self.decoder.dec)
+        shallow_idx = max(n_dec // 2 - 1, 0)
+        for i in range(shallow_idx + 1):
+            dec_z = self.decoder.dec[i](dec_z)
+        decoder_shallow = dec_z
+        for i in range(shallow_idx + 1, n_dec - 1):
+            dec_z = self.decoder.dec[i](dec_z)
+        decoder_deep = self.decoder.dec[-1](dec_z + skip)
+
+        y = self.decoder.readout(decoder_deep)
+        y = y.view(B, T, H, W)
+
+        raw_output = self.tail(y)
+        mask = torch.sigmoid(raw_output[:, : self.args.hr_slice_patch, :, :])
+        delta = raw_output[:, self.args.hr_slice_patch :, :, :]
+        out = mask * warped0 + (1 - mask) * warped1 + delta
+        out[:, :: self.args.upscale] = x
+        out = out.permute(0, 2, 3, 1).contiguous()
+
+        vis = {
+            "lr_input": x,
+            "warped0": warped0,
+            "warped1": warped1,
+            "flow01_list": flow01_list,
+            "flow10_list": flow10_list,
+            "encoder_input": enc_in,
+            "encoder_shallow": skip,
+            "encoder_deep": embed,
+            "freq_shallow_feat": freq_shallow_feat,
+            "freq_shallow_maps": freq_shallow_maps,
+            "freq_deep_feat": freq_deep_feat,
+            "freq_deep_maps": freq_deep_maps,
+            "decoder_shallow": decoder_shallow,
+            "decoder_deep": decoder_deep,
+            "before_tail": y,
+            "raw_tail": raw_output,
+            "mask": mask,
+            "delta": delta,
+            "fused": mask * warped0 + (1 - mask) * warped1 + delta,
+        }
+        return out, vis
+
     def forward(self, x):
         x = x.permute(0, 3, 1, 2).contiguous()
         i_start = x[:, :-1, :, :]
