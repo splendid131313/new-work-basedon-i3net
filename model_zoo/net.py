@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, CrossViewBlock
+from .i3net.basic_model import default_conv
 from .i3net.pfg import MidPFG, Encoder, Decoder
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
 
-# from i3net.basic_model import default_conv, CrossViewBlock
+# from i3net.basic_model import default_conv
 # from i3net.pfg import MidPFG, Encoder, Decoder
 # from flowseek.core.flowseek import FlowSeek
 # from i3net.flow_module import warp
@@ -28,14 +28,14 @@ class I3Net(nn.Module):
 
         
         self.encoder = Encoder(c_in=3, c_hid=n_feats, n_s=4, k=kernel_size, act_inplace=False)
-        self.decoder = Decoder(c_hid=n_feats, c_out=1, n_s=4, k=kernel_size, act_inplace=False)
+        self.decoder = Decoder(c_hid=n_feats, c_out=2, n_s=4, k=kernel_size, act_inplace=False)
         self.flowseek = FlowSeek(args)
         self.hid = MidPFG(in_ch=out_slice * n_feats, depth=num_blocks, groups_pw=1, layerscale_init=1e-6, cel_k=(3, 5, 7), drop=0.0, drop_path=0.0, pfga_K=(9, 15, 31))
 
         modules_tail = [
             conv(out_slice, n_feats, kernel_size),
             nn.ReLU(),
-            conv(n_feats, out_slice * 2, kernel_size),
+            conv(n_feats, out_slice, kernel_size),
         ]
         self.tail = nn.Sequential(*modules_tail)
         tail_last = self.tail[-1]
@@ -236,11 +236,11 @@ class I3Net(nn.Module):
         hid = z.reshape(B * T, c2, h2, w2)
 
         y = self.decoder(hid, skip)
-        y = y.view(-1, T, H, W)
+        y = y.view(-1, T * 2, H, W)
 
-        raw_output = self.tail(y)
-        mask = torch.sigmoid(raw_output[:, :self.args.hr_slice_patch, :, :])
-        delta = raw_output[:, self.args.hr_slice_patch:, :, :]
+        y = self.tail(y)
+        mask = torch.sigmoid(y[:, :self.args.hr_slice_patch, :, :])
+        delta = y[:, self.args.hr_slice_patch:, :, :]
 
         out = mask * warped0 + (1 - mask) * warped1 + delta
 
