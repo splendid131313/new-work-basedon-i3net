@@ -4,10 +4,11 @@ I3NET 中间特征可视化脚本。
 展示内容:
     - 光流 (flow01 / flow10)
     - 重采样图 (warped0 / warped1)
-    - Encoder 浅层 / 深层特征
-    - 频率分支 (MidPFG) 浅层 / 深层特征 + 频率门控图
-    - Decoder 浅层 / 深层特征
-    - Tail 前后输出、mask、delta、融合结果
+    - 融合消融指标 (warp0/warp1/warp_avg/fused_no_delta/final 的 PSNR/SSIM, delta 统计)
+    - Encoder 浅层 / 深层特征 (通道均值 heatmap + 全通道网格)
+    - 频率分支 (MidPFG) 浅层 / 深层特征 + 频率门控图 (全通道网格)
+    - Decoder 浅层 / 深层特征 (全通道网格)
+    - Tail 前输出 (before_tail)、mask、delta、融合结果
 
 用法示例:
     python visualize_features.py \\
@@ -59,6 +60,7 @@ import matplotlib.pyplot as plt
 from data import testSet
 from select_model import select_model
 from model_zoo.flowseek.core.utils.flow_viz import flow_to_image
+from util_evaluation import calc_psnr, calc_ssim
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +143,59 @@ def feat_to_heatmap(feat, reduce="mean"):
     return (arr / denom).astype(np.float32)
 
 
+def normalize_channels(feat):
+    """(C, H, W) 或 (H, W) -> 逐通道 min-max 归一化。"""
+    arr = _to_numpy(feat)
+    if arr.ndim == 2:
+        arr = arr[None, ...]
+    if arr.ndim == 4:
+        arr = arr[0]
+    out = np.zeros_like(arr, dtype=np.float32)
+    for c in range(arr.shape[0]):
+        ch = arr[c]
+        ch = ch - ch.min()
+        out[c] = ch / (ch.max() + 1e-8)
+    return out
+
+
+def save_channel_grid(
+    feat,
+    save_path,
+    title=None,
+    ncols=8,
+    cmap="viridis",
+    max_channels=None,
+    cell_size=1.5,
+):
+    """
+    将 (C, H, W) 特征的所有通道排列成网格图保存。
+    (H, W) 单通道输入会显示为 1 格。
+    """
+    arr = normalize_channels(feat)
+    if max_channels is not None:
+        arr = arr[: max(1, min(max_channels, arr.shape[0]))]
+    c = arr.shape[0]
+    nrows = (c + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * cell_size, nrows * cell_size),
+        squeeze=False,
+    )
+    for idx in range(nrows * ncols):
+        r, col = divmod(idx, ncols)
+        ax = axes[r, col]
+        if idx < c:
+            ax.imshow(arr[idx], cmap=cmap, vmin=0, vmax=1)
+            ax.set_title(f"c{idx:02d}", fontsize=6)
+        ax.axis("off")
+    if title:
+        fig.suptitle(title, fontsize=11)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def flow_tensor_to_rgb(flow):
     """(2, H, W) tensor -> RGB numpy [H, W, 3]."""
     arr = _to_numpy(flow)
@@ -200,6 +255,281 @@ def save_freq_maps(freq_maps, save_path, title_prefix="Freq"):
     save_panel_grid(panels, save_path, ncols=4, suptitle=f"{title_prefix} Gating Maps (PFGA)")
 
 
+def save_channel_grids_for_vis(vis, hr_idx, save_dir, tag, ncols=8):
+    """
+    保存 encoder / decoder / freq 全通道网格，以及 tail 前单通道输出。
+    参考 slice (hr_idx) 存汇总图；每个 T 在 channel_grids/<name>/ 下各存一张。
+    """
+    grid_root = os.path.join(save_dir, "channel_grids")
+    T = vis["mask"].shape[1]
+    bt = bt_index(hr_idx)
+
+    grid_specs = (
+        ("encoder_shallow", vis["encoder_shallow"], "Encoder shallow (skip)"),
+        ("encoder_deep", vis["encoder_deep"], "Encoder deep (embed)"),
+        ("freq_shallow", vis["freq_shallow_feat"], "Freq shallow (MSInit)"),
+        ("freq_deep", vis["freq_deep_feat"], "Freq deep (PFG blocks)"),
+        ("decoder_shallow", vis["decoder_shallow"], "Decoder shallow"),
+        ("decoder_deep", vis["decoder_deep"], "Decoder deep"),
+    )
+
+    for name, _, _ in grid_specs:
+        os.makedirs(os.path.join(grid_root, name), exist_ok=True)
+    os.makedirs(os.path.join(grid_root, "before_tail"), exist_ok=True)
+    os.makedirs(os.path.join(grid_root, "freq_maps_shallow"), exist_ok=True)
+    os.makedirs(os.path.join(grid_root, "freq_maps_deep"), exist_ok=True)
+
+    for name, tensor, label in grid_specs:
+        save_channel_grid(
+            tensor[bt],
+            os.path.join(save_dir, f"{tag}_grid_{name}_T{hr_idx:02d}.png"),
+            title=f"{label} — all channels (T{hr_idx:02d})",
+            ncols=ncols,
+        )
+
+    before_tail_slice = vis["before_tail"][0, hr_idx]
+    save_channel_grid(
+        before_tail_slice,
+        os.path.join(save_dir, f"{tag}_grid_before_tail_T{hr_idx:02d}.png"),
+        title=f"Before tail — T{hr_idx:02d}",
+        ncols=1,
+        cmap="gray",
+    )
+    save_channel_grid(
+        vis["freq_shallow_maps"][bt],
+        os.path.join(save_dir, f"{tag}_grid_freq_maps_shallow_T{hr_idx:02d}.png"),
+        title=f"Freq gating maps shallow — T{hr_idx:02d}",
+        ncols=4,
+        cmap="magma",
+    )
+    save_channel_grid(
+        vis["freq_deep_maps"][bt],
+        os.path.join(save_dir, f"{tag}_grid_freq_maps_deep_T{hr_idx:02d}.png"),
+        title=f"Freq gating maps deep — T{hr_idx:02d}",
+        ncols=4,
+        cmap="magma",
+    )
+
+    for t in range(T):
+        bi = bt_index(t)
+        for name, tensor, label in grid_specs:
+            save_channel_grid(
+                tensor[bi],
+                os.path.join(grid_root, name, f"{tag}_t{t:02d}.png"),
+                title=f"{label} T{t:02d}",
+                ncols=ncols,
+            )
+        save_channel_grid(
+            vis["before_tail"][0, t],
+            os.path.join(grid_root, "before_tail", f"{tag}_t{t:02d}.png"),
+            title=f"Before tail T{t:02d}",
+            ncols=1,
+            cmap="gray",
+        )
+        save_channel_grid(
+            vis["freq_shallow_maps"][bi],
+            os.path.join(grid_root, "freq_maps_shallow", f"{tag}_t{t:02d}.png"),
+            title=f"Freq maps shallow T{t:02d}",
+            ncols=4,
+            cmap="magma",
+        )
+        save_channel_grid(
+            vis["freq_deep_maps"][bi],
+            os.path.join(grid_root, "freq_maps_deep", f"{tag}_t{t:02d}.png"),
+            title=f"Freq maps deep T{t:02d}",
+            ncols=4,
+            cmap="magma",
+        )
+
+
+def _interp_slice_indices(num_slices, upscale):
+    return [i for i in range(num_slices) if i % upscale != 0]
+
+
+def _slice_metric(pred, gt):
+    """(H, W) numpy -> PSNR / SSIM。"""
+    pred_t = torch.from_numpy(_to_numpy(pred)).double()
+    gt_t = torch.from_numpy(_to_numpy(gt)).double()
+    return {
+        "psnr": float(calc_psnr(pred_t, gt_t).item()),
+        "ssim": float(calc_ssim(pred_t, gt_t)),
+    }
+
+
+def _avg_metrics(per_slice_metrics):
+    if not per_slice_metrics:
+        return {"psnr": float("nan"), "ssim": float("nan")}
+    return {
+        "psnr": float(np.mean([m["psnr"] for m in per_slice_metrics])),
+        "ssim": float(np.mean([m["ssim"] for m in per_slice_metrics])),
+    }
+
+
+def compute_fusion_ablation_metrics(vis, gt_vol, pred_vol, upscale):
+    """
+    对比各融合阶段相对 GT 的质量，用于判断 warp 提升是否被 delta 吸收。
+
+    阶段:
+        warp0 / warp1 / warp_avg / warp_best(oracle)
+        fused_no_delta = mask*w0 + (1-mask)*w1
+        pre_anchor     = fused_no_delta + delta (替换关键帧前)
+        final          = 模型最终输出 (含关键帧锚定)
+    """
+    warped0 = _to_numpy(vis["warped0"][0])
+    warped1 = _to_numpy(vis["warped1"][0])
+    mask = _to_numpy(vis["mask"][0])
+    delta = _to_numpy(vis["delta"][0])
+    gt = _to_numpy(gt_vol)
+    pred = _to_numpy(pred_vol)
+    T = mask.shape[0]
+
+    warp_avg_vol = 0.5 * (warped0 + warped1)
+    fused_no_delta_vol = mask * warped0 + (1.0 - mask) * warped1
+    pre_anchor_vol = fused_no_delta_vol + delta
+
+    per_t = []
+    for t in range(T):
+        gt_slice = gt[..., t]
+        m_w0 = _slice_metric(warped0[t], gt_slice)
+        m_w1 = _slice_metric(warped1[t], gt_slice)
+        row = {
+            "t": t,
+            "is_interp": t % upscale != 0,
+            "warp0": m_w0,
+            "warp1": m_w1,
+            "warp_avg": _slice_metric(warp_avg_vol[t], gt_slice),
+            "warp_best": m_w0 if m_w0["ssim"] >= m_w1["ssim"] else m_w1,
+            "fused_no_delta": _slice_metric(fused_no_delta_vol[t], gt_slice),
+            "pre_anchor": _slice_metric(pre_anchor_vol[t], gt_slice),
+            "final": _slice_metric(pred[..., t], gt_slice),
+            "delta_mean_abs": float(np.mean(np.abs(delta[t]))),
+            "delta_max_abs": float(np.max(np.abs(delta[t]))),
+            "delta_rmse": float(np.sqrt(np.mean(delta[t] ** 2))),
+            "mask_mean": float(np.mean(mask[t])),
+        }
+        per_t.append(row)
+
+    interp_rows = [r for r in per_t if r["is_interp"]]
+    key_rows = [r for r in per_t if not r["is_interp"]]
+
+    def _collect(stage):
+        return _avg_metrics([r[stage] for r in per_t])
+
+    def _collect_interp(stage):
+        return _avg_metrics([r[stage] for r in interp_rows])
+
+    delta_interp = interp_rows or per_t
+    return {
+        "num_T": T,
+        "num_interp": len(interp_rows),
+        "num_key": len(key_rows),
+        "per_t": per_t,
+        "avg_all": {stage: _collect(stage) for stage in (
+            "warp0", "warp1", "warp_avg", "warp_best", "fused_no_delta", "pre_anchor", "final"
+        )},
+        "avg_interp": {stage: _collect_interp(stage) for stage in (
+            "warp0", "warp1", "warp_avg", "warp_best", "fused_no_delta", "pre_anchor", "final"
+        )},
+        "delta_stats": {
+            "mean_abs": float(np.mean([r["delta_mean_abs"] for r in delta_interp])),
+            "max_abs": float(np.max([r["delta_max_abs"] for r in delta_interp])),
+            "rmse": float(np.mean([r["delta_rmse"] for r in delta_interp])),
+            "mask_mean": float(np.mean([r["mask_mean"] for r in delta_interp])),
+        },
+        "volumes": {
+            "warp_avg": warp_avg_vol,
+            "fused_no_delta": fused_no_delta_vol,
+            "pre_anchor": pre_anchor_vol,
+        },
+    }
+
+
+def save_fusion_metrics_report(metrics, save_path):
+    """将融合消融指标写入文本报告。"""
+    lines = [
+        "Fusion Ablation Metrics (vs GT)",
+        "=" * 72,
+        f"T={metrics['num_T']} | interp={metrics['num_interp']} | key={metrics['num_key']}",
+        "",
+        "Average on ALL slices:",
+        f"  {'stage':<18} {'PSNR':>10} {'SSIM':>10}",
+    ]
+    for stage, vals in metrics["avg_all"].items():
+        lines.append(f"  {stage:<18} {vals['psnr']:10.4f} {vals['ssim']:10.6f}")
+
+    lines.extend([
+        "",
+        "Average on INTERP slices only (插值帧, 与 test.py ssim_slice 一致):",
+        f"  {'stage':<18} {'PSNR':>10} {'SSIM':>10}",
+    ])
+    for stage, vals in metrics["avg_interp"].items():
+        lines.append(f"  {stage:<18} {vals['psnr']:10.4f} {vals['ssim']:10.6f}")
+
+    ds = metrics["delta_stats"]
+    lines.extend([
+        "",
+        "Delta stats (interp slices):",
+        f"  mean(|delta|) = {ds['mean_abs']:.6f}",
+        f"  max(|delta|)  = {ds['max_abs']:.6f}",
+        f"  rmse(delta)   = {ds['rmse']:.6f}",
+        f"  mean(mask)    = {ds['mask_mean']:.6f}",
+        "",
+        "Per-slice detail (interp only):",
+        f"  {'T':>3} {'warp_avg':>10} {'fused':>10} {'pre_anchor':>10} {'final':>10} "
+        f"{'|delta|':>10} {'mask':>8}",
+    ])
+    for row in metrics["per_t"]:
+        if not row["is_interp"]:
+            continue
+        lines.append(
+            f"  {row['t']:3d} "
+            f"{row['warp_avg']['ssim']:10.6f} "
+            f"{row['fused_no_delta']['ssim']:10.6f} "
+            f"{row['pre_anchor']['ssim']:10.6f} "
+            f"{row['final']['ssim']:10.6f} "
+            f"{row['delta_mean_abs']:10.6f} "
+            f"{row['mask_mean']:8.4f}"
+        )
+
+    lines.extend([
+        "",
+        "解读提示:",
+        "  - 若 warp_avg/fused 提升但 final 不变 -> delta 吸收了 warp 收益",
+        "  - 若仅 warp 提升、fused/final 都不变 -> 下游 mask 未利用更好 warp",
+        "  - 对比两次实验的 delta_stats 可验证补偿是否减弱",
+    ])
+
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def save_ablation_comparison_strip(metrics, gt_vol, pred_vol, save_dir, tag, upscale):
+    """保存插值帧的 warp_avg / fused_no_delta / final / GT 横向对比条。"""
+    interp_idx = _interp_slice_indices(metrics["num_T"], upscale)
+    if not interp_idx:
+        return
+
+    vols = metrics["volumes"]
+    gt = _to_numpy(gt_vol)
+    pred = _to_numpy(pred_vol)
+
+    panels = []
+    for t in interp_idx:
+        panels.append((f"T{t:02d} warp_avg", vols["warp_avg"][t], "gray", 0, 1))
+        panels.append((f"T{t:02d} fused", vols["fused_no_delta"][t], "gray", 0, 1))
+        panels.append((f"T{t:02d} final", pred[..., t], "gray", 0, 1))
+        panels.append((f"T{t:02d} GT", gt[..., t], "gray", 0, 1))
+
+    os.makedirs(save_dir, exist_ok=True)
+    save_panel_grid(
+        panels,
+        os.path.join(save_dir, f"{tag}_ablation_interp_compare.png"),
+        ncols=4,
+        figsize_per_col=2.5,
+        suptitle="Interp slices: warp_avg | fused(no delta) | final | GT",
+    )
+
+
 def get_flow_for_hr_t(flow01_list, flow10_list, t, upscale):
     """
     为 HR 网格上第 t 个 slice 取对应光流。
@@ -235,15 +565,23 @@ def save_single_image(img, save_path, title=None, cmap="gray", vmin=None, vmax=N
     plt.close()
 
 
-def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale):
+def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale, ablation_vols=None):
     """
     对 B,T,H,W 张量按每个 T 保存单张图。
-    包含: 光流、重采样、mask、tail、delta。
+    包含: 光流、重采样、mask、tail、delta、融合消融中间结果。
     """
     T = vis["mask"].shape[1]
     delta_global_vmax = max(
         float(np.abs(_to_numpy(vis["delta"][0])).max()), 1e-6
     )
+    if ablation_vols is None:
+        warped0_np = _to_numpy(vis["warped0"][0])
+        warped1_np = _to_numpy(vis["warped1"][0])
+        mask_np = _to_numpy(vis["mask"][0])
+        ablation_vols = {
+            "warp_avg": 0.5 * (warped0_np + warped1_np),
+            "fused_no_delta": mask_np * warped0_np + (1.0 - mask_np) * warped1_np,
+        }
 
     subdirs = {
         "flow01": os.path.join(save_dir, "flow01"),
@@ -251,6 +589,8 @@ def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale):
         "flow_rgb": os.path.join(save_dir, "flow_rgb"),
         "warped0": os.path.join(save_dir, "warped0"),
         "warped1": os.path.join(save_dir, "warped1"),
+        "warp_avg": os.path.join(save_dir, "warp_avg"),
+        "fused_no_delta": os.path.join(save_dir, "fused_no_delta"),
         "before_tail": os.path.join(save_dir, "before_tail"),
         "mask": os.path.join(save_dir, "mask"),
         "delta": os.path.join(save_dir, "delta"),
@@ -263,6 +603,7 @@ def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale):
 
     flow01_strip, flow10_strip = [], []
     warped0_strip, warped1_strip = [], []
+    warp_avg_strip, fused_no_delta_strip = [], []
     mask_strip, before_tail_strip, delta_strip = [], [], []
     gt_strip, pred_strip = [], []
 
@@ -305,6 +646,21 @@ def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale):
         )
         warped0_strip.append(w0)
         warped1_strip.append(w1)
+
+        warp_avg = ablation_vols["warp_avg"][t]
+        fused_no_delta = ablation_vols["fused_no_delta"][t]
+        save_single_image(
+            warp_avg,
+            os.path.join(subdirs["warp_avg"], f"{tag}_t{t:02d}.png"),
+            title=f"warp_avg {title_suffix}", vmin=0, vmax=1,
+        )
+        save_single_image(
+            fused_no_delta,
+            os.path.join(subdirs["fused_no_delta"], f"{tag}_t{t:02d}.png"),
+            title=f"fused(no delta) {title_suffix}", vmin=0, vmax=1,
+        )
+        warp_avg_strip.append(warp_avg)
+        fused_no_delta_strip.append(fused_no_delta)
 
         before_tail = _to_numpy(vis["before_tail"][0, t])
         mask = _to_numpy(vis["mask"][0, t])
@@ -361,6 +717,13 @@ def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale):
     _save_t_strip(flow10_strip, os.path.join(strip_dir, f"{tag}_flow10_all_T.png"), "Flow10 — all T")
     _save_t_strip(warped0_strip, os.path.join(strip_dir, f"{tag}_warped0_all_T.png"), "Warped0 — all T", vmin=0, vmax=1)
     _save_t_strip(warped1_strip, os.path.join(strip_dir, f"{tag}_warped1_all_T.png"), "Warped1 — all T", vmin=0, vmax=1)
+    _save_t_strip(warp_avg_strip, os.path.join(strip_dir, f"{tag}_warp_avg_all_T.png"), "Warp avg — all T", vmin=0, vmax=1)
+    _save_t_strip(
+        fused_no_delta_strip,
+        os.path.join(strip_dir, f"{tag}_fused_no_delta_all_T.png"),
+        "Fused (no delta) — all T",
+        vmin=0, vmax=1,
+    )
     _save_t_strip(before_tail_strip, os.path.join(strip_dir, f"{tag}_before_tail_all_T.png"), "Before Tail — all T", vmin=0, vmax=1)
     _save_t_strip(mask_strip, os.path.join(strip_dir, f"{tag}_mask_all_T.png"), "Mask — all T", vmin=0, vmax=1)
     _save_t_strip(
@@ -371,16 +734,22 @@ def save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, upscale):
     _save_t_strip(pred_strip, os.path.join(strip_dir, f"{tag}_pred_all_T.png"), "Pred — all T", vmin=0, vmax=1)
 
 
-def save_all_features(vis, hr_idx, gt_vol, pred_vol, save_dir, tag):
+def save_all_features(vis, hr_idx, gt_vol, pred_vol, save_dir, tag, ablation_metrics=None):
     """
     保存全部中间结果。B,T,H,W 量 (光流/重采样/mask/tail/delta) 按每个 T 各存一张；
     encoder/decoder/freq 特征同样按 T 索引一一对应。
     """
     os.makedirs(save_dir, exist_ok=True)
     T = vis["mask"].shape[1]
+    ablation_vols = None if ablation_metrics is None else ablation_metrics["volumes"]
 
     # 1) 光流 / 重采样 / mask / tail / delta — 每个 T 一张
-    save_per_t_bt_series(vis, gt_vol, pred_vol, save_dir, tag, args.upscale)
+    save_per_t_bt_series(
+        vis, gt_vol, pred_vol, save_dir, tag, args.upscale, ablation_vols=ablation_vols
+    )
+
+    # 1b) encoder / decoder / freq / before_tail 全通道网格
+    save_channel_grids_for_vis(vis, hr_idx, save_dir, tag, ncols=8)
 
     # 2) 以下特征图仍额外保存 hr_idx 参考 slice 的对比拼图
     bt = bt_index(hr_idx)
@@ -553,14 +922,36 @@ def process_one_volume(model, gt, name, out_root, args):
     pred_np = _to_numpy(pred)
     tag = str(name).replace(os.sep, "_").replace(".", "_")
 
+    ablation_metrics = compute_fusion_ablation_metrics(
+        vis, tmp_gt_np, pred_np, args.upscale
+    )
+
     vol_dir = os.path.join(out_root, tag)
-    save_all_features(vis, hr_idx, tmp_gt_np, pred_np, vol_dir, tag)
+    save_all_features(vis, hr_idx, tmp_gt_np, pred_np, vol_dir, tag, ablation_metrics)
+    save_fusion_metrics_report(
+        ablation_metrics, os.path.join(vol_dir, "fusion_ablation_metrics.txt")
+    )
+    save_ablation_comparison_strip(
+        ablation_metrics, tmp_gt_np, pred_np, vol_dir, tag, args.upscale
+    )
 
     mse_all = float(np.mean((pred_np - tmp_gt_np) ** 2))
     psnr_all = 10 * np.log10(1.0 / mse_all) if mse_all > 1e-12 else 99.0
     T = vis["mask"].shape[1]
-    print(f"  [{tag}] T={T} | PSNR(all)={psnr_all:.3f} dB | per-T images in {vol_dir}")
-    return {"name": tag, "num_T": T, "psnr": f"{psnr_all:.3f}"}
+    interp_avg = ablation_metrics["avg_interp"]
+    print(
+        f"  [{tag}] T={T} | PSNR(all)={psnr_all:.3f} dB | "
+        f"SSIM(interp): warp_avg={interp_avg['warp_avg']['ssim']:.4f} "
+        f"fused={interp_avg['fused_no_delta']['ssim']:.4f} "
+        f"final={interp_avg['final']['ssim']:.4f} | "
+        f"|delta|={ablation_metrics['delta_stats']['mean_abs']:.5f}"
+    )
+    return {
+        "name": tag,
+        "num_T": T,
+        "psnr": f"{psnr_all:.3f}",
+        "ablation": ablation_metrics,
+    }
 
 
 def main():
@@ -589,25 +980,56 @@ def main():
         row = process_one_volume(model, volume, name, out_root, args)
         rows.append(row)
 
+    def _mean_interp_metric(rows, stage, key):
+        vals = [r["ablation"]["avg_interp"][stage][key] for r in rows]
+        return float(np.mean(vals)) if vals else float("nan")
+
     summary_path = os.path.join(out_root, "summary.txt")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("I3NET Feature Visualization Summary\n")
         f.write("=" * 40 + "\n")
         f.write(f"checkpoint: {args.ckpt}\n")
+        f.write(f"flow_ckpt:  {args.flow_ckpt}\n")
         f.write(f"testdata:   {args.testdata_path}\n")
         f.write(f"ref_slice:  {pick_hr_slice_idx(args)} (拼图参考帧)\n\n")
+
+        f.write("Per-volume PSNR (all slices):\n")
         for row in rows:
-            f.write(f"{row['name']}: T={row['num_T']}, PSNR={row['psnr']} dB\n")
+            f.write(f"  {row['name']}: T={row['num_T']}, PSNR={row['psnr']} dB\n")
+
+        f.write("\nFusion ablation — avg SSIM on INTERP slices:\n")
+        f.write(f"  {'volume':<24} {'warp_avg':>10} {'fused':>10} {'final':>10} {'|delta|':>10}\n")
+        for row in rows:
+            ia = row["ablation"]["avg_interp"]
+            ds = row["ablation"]["delta_stats"]
+            f.write(
+                f"  {row['name']:<24} "
+                f"{ia['warp_avg']['ssim']:10.6f} "
+                f"{ia['fused_no_delta']['ssim']:10.6f} "
+                f"{ia['final']['ssim']:10.6f} "
+                f"{ds['mean_abs']:10.6f}\n"
+            )
+
+        if len(rows) > 1:
+            f.write("\nDataset mean (interp SSIM):\n")
+            for stage in ("warp0", "warp1", "warp_avg", "warp_best", "fused_no_delta", "pre_anchor", "final"):
+                f.write(f"  {stage:<18} SSIM={_mean_interp_metric(rows, stage, 'ssim'):.6f}\n")
+            mean_delta = float(np.mean([r["ablation"]["delta_stats"]["mean_abs"] for r in rows]))
+            f.write(f"  {'mean(|delta|)':<18} {mean_delta:.6f}\n")
 
     print(f"\nDone. Results saved to: {out_root}")
-    print("  - summary.txt")
+    print("  - summary.txt (含融合消融 SSIM 汇总)")
     print("  - <volume_name>/flow01/t00.png ...     (每个 T 一张光流)")
     print("  - <volume_name>/mask/t00.png ...       (每个 T 一张 mask)")
     print("  - <volume_name>/before_tail/t00.png ...")
     print("  - <volume_name>/delta/t00.png ...")
-    print("  - <volume_name>/warped0|warped1/t00.png ...")
+    print("  - <volume_name>/warped0|warped1|warp_avg|fused_no_delta/t00.png ...")
+    print("  - <volume_name>/fusion_ablation_metrics.txt  (各阶段 PSNR/SSIM)")
+    print("  - <volume_name>/*_ablation_interp_compare.png  (插值帧对比条)")
     print("  - <volume_name>/strips/*_all_T.png     (所有 T 横向拼接)")
     print("  - <volume_name>/00_overview.png        (参考 slice 总览拼图)")
+    print("  - <volume_name>/*_grid_*.png           (参考 slice 全通道网格)")
+    print("  - <volume_name>/channel_grids/         (每个 T 的全通道网格)")
 
 
 if __name__ == "__main__":
