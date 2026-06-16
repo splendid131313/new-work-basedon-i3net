@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, HighFrequencyAttention
+from .i3net.basic_model import default_conv, NeighborFusion
 from .i3net.pfg import MidPFG, Encoder, Decoder
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
@@ -28,12 +28,12 @@ class I3Net(nn.Module):
 
         
         # raw w0/w1/diff + HF residuals from slice_attn
-        self.encoder = Encoder(c_in=5, c_hid=n_feats, n_s=4, k=kernel_size, act_inplace=False)
+        self.encoder = Encoder(c_in=3, c_hid=n_feats, n_s=4, k=kernel_size, act_inplace=False)
         self.decoder = Decoder(c_hid=n_feats, c_out=2, n_s=4, k=kernel_size, act_inplace=False)
         self.flowseek = FlowSeek(args)
         self.hid = MidPFG(in_ch=out_slice * n_feats, depth=num_blocks, groups_pw=1, layerscale_init=1e-6, cel_k=(3, 5, 7), drop=0.0, drop_path=0.0, pfga_K=(9, 15, 31))
 
-        self.slice_attn = HighFrequencyAttention(out_slice, n_feats)
+        self.slice_attn = NeighborFusion()
         modules_tail = [
             conv(out_slice * 2, n_feats, kernel_size),
             nn.ReLU(),
@@ -127,23 +127,6 @@ class I3Net(nn.Module):
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
 
         return w0_seq, w1_seq, flow01_list, flow10_list
-
-    def _enhance_warped(self, warped0, warped1):
-        """HF-enhance warped volumes; keep raw copies for encoder input."""
-        warped0_raw = warped0
-        warped1_raw = warped1
-        warped0_enh = self.slice_attn(warped0_raw)
-        warped1_enh = self.slice_attn(warped1_raw)
-        return warped0_raw, warped1_raw, warped0_enh, warped1_enh
-
-    def _build_encoder_input(self, warped0_raw, warped1_raw, warped0_enh, warped1_enh):
-        """Encoder sees raw warp + explicit HF residuals; fusion uses enhanced warps."""
-        B, T, H, W = warped0_raw.shape
-        w0 = warped0_raw.reshape(B * T, 1, H, W)
-        w1 = warped1_raw.reshape(B * T, 1, H, W)
-        hf0 = (warped0_enh - warped0_raw).reshape(B * T, 1, H, W)
-        hf1 = (warped1_enh - warped1_raw).reshape(B * T, 1, H, W)
-        return torch.cat([w0, w1, w0 - w1, hf0, hf1], dim=1)
 
     def forward_with_vis(self, x):
         """前向推理并返回中间特征，供可视化脚本使用。"""
@@ -252,18 +235,11 @@ class I3Net(nn.Module):
         B, T, H, W = warped0.shape
 
         ####### slice attntion #########
-        # warped0 = self.slice_attn(warped0)
-        # warped1 = self.slice_attn(warped1)
-        # w0 = warped0.view(B * T, -1, H, W)
-        # w1 = warped1.view(B * T, -1, H, W)
-        # x0 = torch.cat([w0, w1, w0 - w1], dim=1)
-
-        warped0_raw, warped1_raw, warped0_enh, warped1_enh = self._enhance_warped(
-            warped0, warped1
-        )
-        x0 = self._build_encoder_input(
-            warped0_raw, warped1_raw, warped0_enh, warped1_enh
-        )
+        warped0 = self.slice_attn(warped0)
+        warped1 = self.slice_attn(warped1)
+        w0 = warped0.view(B * T, -1, H, W)
+        w1 = warped1.view(B * T, -1, H, W)
+        x0 = torch.cat([w0, w1, w0 - w1], dim=1)
 
         embed, skip = self.encoder(x0)
         _, c2, h2, w2 = embed.shape
@@ -279,7 +255,7 @@ class I3Net(nn.Module):
         mask = torch.sigmoid(y[:, :self.args.hr_slice_patch, :, :])
         delta = y[:, self.args.hr_slice_patch:, :, :]
 
-        out = mask * warped0_enh + (1 - mask) * warped1_enh + delta
+        out = mask * warped0 + (1 - mask) * warped1 + delta
 
         out[:, :: self.args.upscale] = x
         out = out.permute(0, 2, 3, 1).contiguous()
