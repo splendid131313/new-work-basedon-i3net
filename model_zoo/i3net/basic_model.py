@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch
 import einops
 from functools import partial
 import torch.nn.functional as F
@@ -141,3 +142,88 @@ class CrossViewBlock(nn.Module):
         x_cor_f = self.conv_cor(x) # b c h w
         x_out = x_cor_f + x_sag_f
         return x_out
+
+class SliceAttentionModule(nn.Module):
+    def __init__(self, in_features, n_feats=64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, n_feats), nn.ReLU(), nn.Linear(n_feats, in_features)
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        avg = torch.mean(x, dim=(2, 3))  # (B, C)
+        maxv = torch.amax(x, dim=(2, 3))  # (B, C)
+
+        att = self.mlp(avg) + self.mlp(maxv)
+
+        att = torch.sigmoid(att).view(B, C, 1, 1)
+
+        return x * att
+
+
+class FreqSliceAttentionModule(nn.Module):
+    """Slice attention in DCT domain; weights from spectral stats, output in pixel domain."""
+
+    def __init__(self, in_features, n_feats=64):
+        super().__init__()
+        self.dct = DCT2x()
+        self.idct = IDCT2x()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, n_feats),
+            nn.ReLU(),
+            nn.Linear(n_feats, in_features),
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x_dct = self.dct(x)
+
+        avg = torch.mean(x_dct, dim=(2, 3))
+        maxv = torch.amax(x_dct, dim=(2, 3))
+        att = torch.sigmoid(self.mlp(avg) + self.mlp(maxv)).view(B, C, 1, 1)
+
+        return self.idct(x_dct * att)
+
+class HighFrequencyAttention(nn.Module):
+    def __init__(self, in_ch, channels):
+        super().__init__()
+
+        self.dct = DCT2x()
+        self.idct = IDCT2x()
+
+        self.att = nn.Sequential(
+            nn.Conv2d(in_ch, channels, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, in_ch, 1),
+        )
+
+    def forward(self, x):
+
+        B, C, H, W = x.shape
+
+        x_dct = self.dct(x)
+
+        # ---------------------
+        # frequency radius
+        # ---------------------
+
+        u = torch.arange(H, device=x.device).float()
+        v = torch.arange(W, device=x.device).float()
+        uu, vv = torch.meshgrid(u, v, indexing="ij")
+        radius = torch.sqrt((uu / H) ** 2 + (vv / W) ** 2)
+        radius = radius[None, None]
+
+        # ---------------------
+        # attention
+        # ---------------------
+
+        feat = torch.abs(x_dct)
+        att = self.att(feat)
+        att = torch.tanh(att)
+        boost = 1.0 + radius * att
+        boost = boost.clamp(min=0.0)
+        x_dct_out = x_dct * boost
+
+        return self.idct(x_dct_out) + x

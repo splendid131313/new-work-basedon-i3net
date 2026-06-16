@@ -91,7 +91,7 @@ def main():
 
     if is_main:
         wandb.init(
-            project="PFG Modules",
+            project="Slice Attention",
             name=wandb_name,
             config=args.__dict__,
         )
