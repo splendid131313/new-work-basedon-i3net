@@ -91,7 +91,7 @@ def main():
 
     if is_main:
         wandb.init(
-            project="i3net_flowseek",
+            project="multi domain fusion",
             name=wandb_name,
             config=args.__dict__,
         )
