@@ -19,9 +19,11 @@ I3Net 中间层特征图可视化 — 逐通道展示各阶段特征。
         post_tail.png         tail 后 (HR slice 通道)
         final_out.png         最终输出 (LR 注入后)
         body_group_first_block{j}_inter.png  第一组 I2Block inter 分支 (64 通道)
-        body_group_first_block{j}_intra.png  第一组 I2Block intra 分支 (64 通道)
+        body_group_first_block{j}_intra.png       第一组 intra（deviation 归一化，推荐）
+        body_group_first_block{j}_intra_minmax.png  第一组 intra（min-max，易呈纯色）
         body_group_last_block{j}_inter.png   最后一组 inter
-        body_group_last_block{j}_intra.png     最后一组 intra
+        body_group_last_block{j}_intra.png        最后一组 intra（deviation）
+        body_group_last_block{j}_intra_minmax.png 最后一组 intra（min-max）
 """
 
 import math
@@ -90,7 +92,19 @@ def _normalize_channel(arr):
     return (arr - vmin) / (vmax - vmin)
 
 
-def save_channel_grid(feat, save_path, title, ncols=None, cmap="viridis"):
+def _normalize_spatial_deviation(arr, clip_sigma=3.0):
+    """去空间均值后按 robust 标准差缩放，突出 intra 的微弱空间结构。"""
+    arr = arr.astype(np.float32)
+    mu = arr.mean()
+    dev = arr - mu
+    sigma = dev.std()
+    if sigma < 1e-8:
+        return None, mu, sigma
+    dev = np.clip(dev / sigma, -clip_sigma, clip_sigma)
+    return (dev + clip_sigma) / (2 * clip_sigma), mu, sigma
+
+
+def save_channel_grid(feat, save_path, title, ncols=None, cmap="viridis", channel_titles=None):
     """feat: [C, H, W] numpy"""
     c, h, w = feat.shape
     if ncols is None:
@@ -114,7 +128,10 @@ def save_channel_grid(feat, save_path, title, ncols=None, cmap="viridis"):
         if idx < c:
             img = _normalize_channel(feat[idx])
             ax.imshow(img, cmap=cmap, vmin=0, vmax=1)
-            ax.set_title(f"ch{idx}", fontsize=7)
+            if channel_titles is not None:
+                ax.set_title(channel_titles[idx], fontsize=6)
+            else:
+                ax.set_title(f"ch{idx}", fontsize=7)
         else:
             ax.axis("off")
 
@@ -123,6 +140,50 @@ def save_channel_grid(feat, save_path, title, ncols=None, cmap="viridis"):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def save_intra_channel_grid(feat, save_path, title, ncols=8):
+    """intra 专用：去均值 + 标准化，避免空间近似常数时 min-max 退化为纯色。"""
+    c, h, w = feat.shape
+    nrows = int(math.ceil(c / ncols))
+    fig_w = min(ncols * 1.6, 24)
+    fig_h = min(nrows * 1.6, 24)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h))
+    if nrows == 1 and ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = axes.reshape(1, -1)
+    elif ncols == 1:
+        axes = axes.reshape(-1, 1)
+
+    flat_count = 0
+    for idx in range(nrows * ncols):
+        r, col = divmod(idx, ncols)
+        ax = axes[r, col]
+        ax.axis("off")
+        if idx >= c:
+            continue
+        ch = feat[idx]
+        ch_range = ch.max() - ch.min()
+        ch_std = ch.std()
+        norm, mu, sigma = _normalize_spatial_deviation(ch)
+        if norm is None:
+            flat_count += 1
+            ax.imshow(np.zeros((h, w)), cmap="gray", vmin=0, vmax=1)
+            ax.set_title(f"ch{idx} flat μ={mu:.2g}", fontsize=6, color="red")
+        else:
+            ax.imshow(norm, cmap="RdBu_r", vmin=0, vmax=1)
+            ax.set_title(f"ch{idx} σ={sigma:.2e} r={ch_range:.2e}", fontsize=6)
+
+    fig.suptitle(
+        f"{title}  (deviation norm, flat={flat_count}/{c})  blue↓ red↑ vs spatial mean",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return flat_count, c
 
 
 def save_pre_fuse_grid(feat, save_path, n_feats, ncols=8):
@@ -190,12 +251,26 @@ def save_inter_intra_branches(model, feats, out_dir, group_ids, ncols):
 
             if intra_key in feats:
                 intra = tensor_to_numpy(feats[intra_key])
+                # min-max 版（与 inter 一致，空间常数通道会呈纯色）
                 save_channel_grid(
+                    intra,
+                    os.path.join(out_dir, f"{label}_block{bid}_intra_minmax.png"),
+                    f"{label} block{bid} intra (min-max)",
+                    ncols=ncols,
+                    cmap="cividis",
+                )
+                # deviation 版（推荐：突出相对空间结构）
+                flat, total = save_intra_channel_grid(
                     intra,
                     os.path.join(out_dir, f"{label}_block{bid}_intra.png"),
                     f"{label} block{bid} intra",
                     ncols=ncols,
-                    cmap="cividis",
+                )
+                print(
+                    f"  {label} block{bid} intra: "
+                    f"flat={flat}/{total}, "
+                    f"global std={intra.std():.4e}, "
+                    f"median spatial σ={np.median(intra.std(axis=(1, 2))):.4e}"
                 )
 
 
