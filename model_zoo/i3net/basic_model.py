@@ -195,47 +195,6 @@ class DWConv(nn.Sequential):
             nn.Conv2d(n_feat*expand,n_feat,1,1,0)
         )
 
-class CrossViewBlock(nn.Module):
-    def __init__(self,n_feat, image_size):
-        super().__init__()
-        
-        self.image_size = image_size
-
-        self.norm = nn.LayerNorm(n_feat)
-
-        self.conv_sag = nn.Sequential(
-            nn.Conv2d(n_feat,n_feat,1,1,0),
-            Rearrange('b c h w -> b h c w'),
-            nn.PixelShuffle(2),
-            nn.Conv2d(image_size//4, n_feat,3,1,1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat,image_size//4,3,1,1),
-            nn.PixelUnshuffle(2),
-            Rearrange('b h c w -> b c h w'),
-        )
-        
-        self.conv_cor = nn.Sequential(
-            nn.Conv2d(n_feat,n_feat,1,1,0),
-            Rearrange('b c h w -> b w c h'),
-            nn.PixelShuffle(2),
-            nn.Conv2d(image_size//4,n_feat,3,1,1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat,image_size//4,3,1,1),
-            nn.PixelUnshuffle(2),
-            Rearrange('b w c h -> b c h w'),
-        )
-
-    def forward(self,x):
-        B,C,H,W = x.shape
-        x = einops.rearrange(x,'b c h w -> b (h w) c')
-        x = self.norm(x)
-        x = einops.rearrange(x,'b (h w) c -> b c h w',h=H,w=W)
-
-        x_sag_f = self.conv_sag(x) # b c h w
-        x_cor_f = self.conv_cor(x) # b c h w
-        x_out = x_cor_f + x_sag_f
-        return x_out
-
 class I3Net(nn.Module):
     def __init__(self,args=None,conv=default_conv):
         super(I3Net, self).__init__()
@@ -260,8 +219,6 @@ class I3Net(nn.Module):
                 conv, n_depth=2,n_feat=n_feats, kernel_size=kernel_size, act=act, res_scale=res_scale, 
                 head_num=head_num, win_num_sqrt=win_num_sqrt, image_size=image_size) for _ in range(num_blocks//2)]
         self.body = nn.ModuleList(modules_body)
-        
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=image_size) for _ in range(3)])
 
         self.fuse_align = nn.Conv2d(3*n_feats,n_feats,1,1,0)
 
@@ -278,13 +235,11 @@ class I3Net(nn.Module):
         res = x_head
 
         align_list = []
-        res = self.alignment[0](res)+res
         align_list.append(res)
 
         for id,layer in enumerate(self.body):
             res = layer(res)
             if id in [3,7]:
-                res = self.alignment[id//4+1](res) + res
                 align_list.append(res)
 
         res = self.fuse_align(torch.cat(align_list,1))
@@ -297,6 +252,76 @@ class I3Net(nn.Module):
         out = out.permute(0,2,3,1).contiguous()
        
         return out
+
+
+def extract_i3net_features(model, x, no_grad=True):
+    """通过 forward hook 提取 I3Net 中间层特征，不修改各模块 forward。
+
+    Args:
+        model: I3Net 或 DataParallel(I3Net)
+        x: 输入张量 [B, H, W, C_lr]
+        no_grad: 是否禁用梯度并临时切换到 eval
+
+    Returns:
+        out: 网络输出 [B, H, W, C_hr]
+        features: 特征字典，键名示例:
+            head, body_group_{i}, body_group_{i}_block_{j},
+            body_group_{i}_block_{j}_inter, body_group_{i}_block_{j}_intra,
+            align_{3|7}, fuse, pre_tail, tail
+    """
+    net = model.module if hasattr(model, 'module') else model
+    features = {}
+    handles = []
+
+    def _register_hook(module, name):
+        def hook(_module, _inputs, output):
+            features[name] = output.detach() if no_grad else output
+        handles.append(module.register_forward_hook(hook))
+
+    _register_hook(net.head, 'head')
+    handles.append(net.head.register_forward_pre_hook(
+        lambda _m, inputs: features.update({'pre_head': inputs[0].detach() if no_grad else inputs[0]})
+    ))
+    for gid, group in enumerate(net.body):
+        _register_hook(group, f'body_group_{gid}')
+        for bid, block in enumerate(group.body):
+            _register_hook(block, f'body_group_{gid}_block_{bid}')
+            _register_hook(block.inter_slice_branch, f'body_group_{gid}_block_{bid}_inter')
+            _register_hook(block.intra_slice_branch, f'body_group_{gid}_block_{bid}_intra')
+    _register_hook(net.fuse_align, 'fuse')
+    handles.append(net.fuse_align.register_forward_pre_hook(
+        lambda _m, inputs: features.update({'pre_fuse': inputs[0].detach() if no_grad else inputs[0]})
+    ))
+    _register_hook(net.tail, 'tail')
+
+    was_training = net.training
+    if no_grad:
+        net.eval()
+
+    try:
+        if no_grad:
+            with torch.no_grad():
+                out = model(x)
+        else:
+            out = model(x)
+    finally:
+        for handle in handles:
+            handle.remove()
+        if no_grad and was_training:
+            net.train()
+
+    if 'head' in features and 'fuse' in features:
+        features['pre_tail'] = features['fuse'] + features['head']
+    num_groups = len(net.body)
+    if num_groups > 0:
+        features['body_group_first'] = features.get('body_group_0')
+        features['body_group_last'] = features.get(f'body_group_{num_groups - 1}')
+    for align_id in (3, 7):
+        key = f'body_group_{align_id}'
+        if key in features:
+            features[f'align_{align_id}'] = features[key]
+
+    return out, features
 
 
 if __name__ == '__main__':
@@ -317,5 +342,7 @@ if __name__ == '__main__':
     model = I3Net(args).cuda(gpy_id)
     x = torch.ones(1,args.image_size,args.image_size,args.lr_slice_patch).cuda(gpy_id)
     y = torch.ones(1,args.image_size,args.image_size,args.hr_slice_patch).cuda(gpy_id)
-    pred=model(x)
-    print(pred.shape)
+    pred, feats = extract_i3net_features(model, x)
+    print('output:', pred.shape)
+    for name, feat in sorted(feats.items()):
+        print(f'  {name}: {feat.shape}')
