@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, I2Group, CrossViewBlock, FreqSliceAttentionModule
+from .i3net.basic_model import default_conv, I2Group, NeighborFusion
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
 
@@ -35,7 +35,7 @@ class I3Net(nn.Module):
         )
         self.flowseek = FlowSeek(args)
 
-        self.slice_attn = FreqSliceAttentionModule(out_slice, n_feats)
+        self.slice_attn = NeighborFusion()
 
         modules_body = [
             I2Group(
@@ -52,8 +52,6 @@ class I3Net(nn.Module):
             for _ in range(num_blocks // 2)
         ]
         self.body = nn.ModuleList(modules_body)
-
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
 
         self.fuse_align = nn.Conv2d(3 * n_feats, n_feats, 1, 1, 0)
 
@@ -131,13 +129,11 @@ class I3Net(nn.Module):
         res = x_head
 
         align_list = []
-        res = self.alignment[0](res) + res
         align_list.append(res)
 
         for id, layer in enumerate(self.body):
             res = layer(res)
             if id in [3, 7]:
-                res = self.alignment[id // 4 + 1](res) + res
                 align_list.append(res)
 
         res = self.fuse_align(torch.cat(align_list, 1))
