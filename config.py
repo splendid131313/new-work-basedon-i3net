@@ -15,7 +15,7 @@ def add_argument_group(name):
 # Dataset
 data_arg = add_argument_group('Dataset')
 data_arg.add_argument('--data_type', type=str, default='direct')
-data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
+data_arg.add_argument('--lr_slice_patch', type=int, default=2, help='每个lr样本的slice个数,插值为中间3个slice')
 data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task06_Lung/train')
 data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
 data_arg.add_argument('--image_size', type=int, default=256)

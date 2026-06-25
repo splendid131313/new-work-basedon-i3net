@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, RDB
+from .i3net.basic_model import default_conv, RDB, KernelGenerator, DynamicRefine
 
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
@@ -51,6 +51,9 @@ class I3Net(nn.Module):
             ]
         )
 
+        self.kernel_generator = KernelGenerator()
+        self.dynamic_refine = DynamicRefine(n_feats)
+        
         modules_tail = [
             conv(n_feats, n_feats, kernel_size),
             nn.ReLU(),
@@ -107,7 +110,7 @@ class I3Net(nn.Module):
                 w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
 
-        return w0_seq, w1_seq
+        return w0_seq, w1_seq, flow
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2).contiguous()
@@ -115,7 +118,14 @@ class I3Net(nn.Module):
         i_end = x[:, 1:, :, :]
         
         # B, T, H, W = x.shape
-        warped0, warped1 = self._get_align(i_start, i_end)
+        warped0, warped1, flow = self._get_align(i_start, i_end)
+
+        flow_mag = torch.norm(flow, dim=1, keepdim=True)
+        
+        ##### 第2种使用位置 ####
+        # kernel = self.kernel_generator(flow_mag)
+        # warped0 = warped0 + self.dynamic_refine(warped0, kernel)
+        # warped1 = warped1 + self.dynamic_refine(warped1, kernel)
 
         align_input = torch.cat([x, warped0, warped1], 1)
         x_head = self.head(align_input)
@@ -126,6 +136,10 @@ class I3Net(nn.Module):
             RDBs_out.append(res)
         res = self.GFF(torch.cat(RDBs_out, 1))
         res += x_head
+
+        ##### 第1种使用位置 #####
+        kernel = self.kernel_generator(flow_mag)
+        res += self.dynamic_refine(res, kernel)
 
         raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
 

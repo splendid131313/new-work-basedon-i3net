@@ -224,3 +224,39 @@ class RDB(nn.Module):
     def forward(self, x):
         return self.LFF(self.convs(x)) + x
 
+class KernelGenerator(nn.Module):
+    def __init__(self, k=3):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 32, 3, 1, 1),
+            nn.ReLU(True),
+            nn.Conv2d(32, 64, 3, 1, 1),
+            nn.ReLU(True),
+            nn.Conv2d(64, 64, 3, 1, 1),
+            nn.ReLU(True),
+            nn.Conv2d(64, k * k, 1),
+        )
+
+    def forward(self, flow_mag):
+
+        kernel = self.net(flow_mag)
+
+        return kernel
+
+class DynamicRefine(nn.Module):
+    def __init__(self, channels):
+
+        super().__init__()
+        
+    def forward(self, feat, kernel):
+
+        B, C, H, W = feat.shape
+
+        unfold_feat = F.unfold(feat, kernel_size=3, padding=1)
+        unfold_feat = unfold_feat.view(B, C, 9, H * W)
+        kernel = kernel.view(B, 1, 9, H * W)
+        out = (unfold_feat * kernel).sum(2)
+        out = out.view(B, C, H, W)
+
+        return out
