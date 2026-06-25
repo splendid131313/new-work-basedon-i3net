@@ -1,8 +1,8 @@
 import torch.nn as nn
+import torch
 import einops
 from functools import partial
 import torch.nn.functional as F
-from einops.layers.torch import Rearrange
 
 from .dct_util import DCT2x,IDCT2x
 
@@ -192,42 +192,35 @@ class DWConv(nn.Sequential):
             nn.Conv2d(n_feat*expand,n_feat,1,1,0)
         )
 
-class CrossViewBlock(nn.Module):
-    def __init__(self,n_feat, image_size):
-        super().__init__()
-        self.image_size = image_size
-
-        self.norm = nn.LayerNorm(n_feat)
-
-        self.conv_sag = nn.Sequential(
-            nn.Conv2d(n_feat,n_feat,1,1,0),
-            Rearrange('b c h w -> b h c w'),
-            nn.PixelShuffle(2),
-            nn.Conv2d(image_size // 4, n_feat, 3, 1, 1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat, image_size // 4, 3, 1, 1),
-            nn.PixelUnshuffle(2),
-            Rearrange('b h c w -> b c h w'),
-        )
-        
-        self.conv_cor = nn.Sequential(
-            nn.Conv2d(n_feat,n_feat,1,1,0),
-            Rearrange('b c h w -> b w c h'),
-            nn.PixelShuffle(2),
-            nn.Conv2d(image_size // 4, n_feat, 3, 1, 1),
-            nn.ReLU(),
-            nn.Conv2d(n_feat, image_size // 4, 3, 1, 1),
-            nn.PixelUnshuffle(2),
-            Rearrange('b w c h -> b c h w'),
+class RDB_Conv(nn.Module):
+    def __init__(self, inChannels, growRate, kSize=3):
+        super(RDB_Conv, self).__init__()
+        Cin = inChannels
+        G = growRate
+        self.conv = nn.Sequential(
+            *[nn.Conv2d(Cin, G, kSize, padding=(kSize - 1) // 2, stride=1), nn.ReLU()]
         )
 
-    def forward(self,x):
-        B,C,H,W = x.shape
-        x = einops.rearrange(x,'b c h w -> b (h w) c')
-        x = self.norm(x)
-        x = einops.rearrange(x,'b (h w) c -> b c h w',h=H,w=W)
+    def forward(self, x):
+        out = self.conv(x)
+        return torch.cat((x, out), 1)
 
-        x_sag_f = self.conv_sag(x) # b c h w
-        x_cor_f = self.conv_cor(x) # b c h w
-        x_out = x_cor_f + x_sag_f
-        return x_out
+
+class RDB(nn.Module):
+    def __init__(self, growRate0, growRate, nConvLayers, kSize=3):
+        super(RDB, self).__init__()
+        G0 = growRate0
+        G = growRate
+        C = nConvLayers
+
+        convs = []
+        for c in range(C):
+            convs.append(RDB_Conv(G0 + c * G, G))
+        self.convs = nn.Sequential(*convs)
+
+        # Local Feature Fusion
+        self.LFF = nn.Conv2d(G0 + C * G, G0, 1, padding=0, stride=1)
+
+    def forward(self, x):
+        return self.LFF(self.convs(x)) + x
+

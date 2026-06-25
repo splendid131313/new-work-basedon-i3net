@@ -222,13 +222,11 @@ class TotalLoss(nn.Module):
         self.lambda_l1 = args.lambda_l1
         self.lambda_lap = args.lambda_lap
         self.lambda_gra = args.lambda_gra
-        self.lambda_ssim = args.lambda_ssim
-        
+
         self.l1 = nn.L1Loss()
         self.lap_loss = LapLoss(channels=args.hr_slice_patch, device=device)
         self.grad_loss = GradientLoss()
-        self.ssim = SSIM()
-        
+
 
     def forward(self, pred, target):
         with autocast(enabled=False):
@@ -238,5 +236,4 @@ class TotalLoss(nn.Module):
             l1 = self.l1(pred, target) * self.lambda_l1
             freq = self.lap_loss(pred, target) * self.lambda_lap
             grad = self.grad_loss(pred, target) * self.lambda_gra
-            ssim_loss = self.ssim(pred, target) * self.lambda_ssim
-            return l1 + freq + grad + ssim_loss
+            return l1 + freq + grad

@@ -91,7 +91,7 @@ def main():
 
     if is_main:
         wandb.init(
-            project="i3net_flowseek",
+            project="saint",
             name=wandb_name,
             config=args.__dict__,
         )
@@ -107,7 +107,6 @@ def main():
 
     best_psnr = 0.0
     last_80_start = int(0.8 * args.max_epoch)
-    last_99_start = int(0.99 * args.max_epoch)
 
     model.train()
     for epoch in range(args.start_epoch, args.max_epoch):
@@ -137,17 +136,15 @@ def main():
 
             if use_amp:
                 with autocast():
-                    sr, flow_list = model(lr)
+                    sr = model(lr)
                     loss_iter = loss_function(sr, gt)
-                    loss = loss_iter
-                scaler.scale(loss).backward()
+                scaler.scale(loss_iter).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                sr, flow_list = model(lr)
+                sr = model(lr)
                 loss_iter = loss_function(sr, gt)
-                loss = loss_iter
-                loss.backward()
+                loss_iter.backward()
                 optimizer.step()
 
             with torch.no_grad():
@@ -239,12 +236,6 @@ def main():
                     args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
                 )
                 print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
-
-            if epoch + 1 > last_99_start:
-                state_dict = model.module.state_dict()
-                torch.save(state_dict,
-                    args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
-                )
 
     if is_main:
         wandb.finish()

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from .i3net.basic_model import default_conv, I2Group, CrossViewBlock
+from .i3net.basic_model import default_conv, RDB
+
 from .flowseek.core.flowseek import FlowSeek
 from .i3net.flow_module import warp
 
@@ -18,15 +19,12 @@ class I3Net(nn.Module):
         n_feats = args.n_feats  # 64
         kernel_size = args.kernel_size  # 3
         num_blocks = args.i_num_blocks  # 16
-        act = nn.ReLU(True)
-        res_scale = args.res_scale  # 1
         in_slice = args.lr_slice_patch * 1
         out_slice = args.hr_slice_patch
-        self.time_list = args.lr_time_list[1:-1]
+        self.D, C, G = {"A": (20, 6, 32), "B": (16, 8, 64), "C": (6, 8, 32)}[
+            args.RDNconfig
+        ]
 
-        head_num = args.head_num
-        win_num_sqrt = args.win_num_sqrt
-        window_size = args.image_size // args.win_num_sqrt
         self.head = nn.Sequential(
             conv(in_slice + 2 * out_slice, n_feats, kernel_size),
             nn.ReLU(),
@@ -34,25 +32,24 @@ class I3Net(nn.Module):
         )
         self.flowseek = FlowSeek(args)
 
-        modules_body = [
-            I2Group(
-                conv,
-                n_depth=2,
-                n_feat=n_feats,
-                kernel_size=kernel_size,
-                act=act,
-                res_scale=res_scale,
-                head_num=head_num,
-                win_num_sqrt=win_num_sqrt,
-                window_size=window_size,
-            )
-            for _ in range(num_blocks // 2)
-        ]
-        self.body = nn.ModuleList(modules_body)
-
-        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
-
-        self.fuse_align = nn.Conv2d(3 * n_feats, n_feats, 1, 1, 0)
+        # Redidual dense blocks and dense feature fusion
+        self.RDBs = nn.ModuleList()
+        for i in range(self.D):
+            self.RDBs.append(RDB(growRate0=n_feats, growRate=G, nConvLayers=C))
+        
+        # Global Feature Fusion
+        self.GFF = nn.Sequential(
+            *[
+                nn.Conv2d(self.D * n_feats, n_feats, 1, padding=0, stride=1),
+                nn.Conv2d(
+                    n_feats,
+                    n_feats,
+                    kernel_size,
+                    padding=(kernel_size - 1) // 2,
+                    stride=1,
+                ),
+            ]
+        )
 
         modules_tail = [
             conv(n_feats, n_feats, kernel_size),
@@ -74,11 +71,11 @@ class I3Net(nn.Module):
         return (rgb * 255.0).clamp(0.0, 255.0)
     
     def _get_align(self, i_start, i_end):
+        self.flowseek.eval()
         B, T, H, W = i_start.shape
 
         w0_seq = torch.zeros((B, self.args.hr_slice_patch, H, W)).to(i_start.device)
         w1_seq = torch.zeros((B, self.args.hr_slice_patch, H, W)).to(i_start.device)
-        flow_list = []
 
         for i in range(self.args.lr_slice_patch):
             idx = i * self.args.upscale
@@ -91,11 +88,11 @@ class I3Net(nn.Module):
             img0 = self._vol_to_flowseek_rgb(img0)
             img1 = self._vol_to_flowseek_rgb(img1)
 
-            flow = self.flowseek(img0, img1, test_mode=True)["final"]
-            flow_list.append(flow)
+            with torch.no_grad():
+                flow = self.flowseek(img0, img1, test_mode=True)["final"]
 
-            # flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
-            # flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
+                # flow01 = self.flowseek(img0, img1, test_mode=True)["final"]
+                # flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
 
             for j in range(1, self.args.upscale):
 
@@ -110,7 +107,7 @@ class I3Net(nn.Module):
                 w0_seq[:, curr_idx, :, :] = torch.mean(img0t, 1) / 255.0
                 w1_seq[:, curr_idx, :, :] = torch.mean(imgt1, 1) / 255.0
 
-        return w0_seq, w1_seq, flow_list
+        return w0_seq, w1_seq
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2).contiguous()
@@ -118,25 +115,16 @@ class I3Net(nn.Module):
         i_end = x[:, 1:, :, :]
         
         # B, T, H, W = x.shape
-        warped0, warped1, flow_list = self._get_align(i_start, i_end)
+        warped0, warped1 = self._get_align(i_start, i_end)
 
         align_input = torch.cat([x, warped0, warped1], 1)
         x_head = self.head(align_input)
-
         res = x_head
-
-        align_list = []
-        res = self.alignment[0](res) + res
-        align_list.append(res)
-
-        for id, layer in enumerate(self.body):
-            res = layer(res)
-            if id in [3, 7]:
-                res = self.alignment[id // 4 + 1](res) + res
-                align_list.append(res)
-
-        res = self.fuse_align(torch.cat(align_list, 1))
-
+        RDBs_out = []
+        for i in range(self.D):
+            res = self.RDBs[i](res)
+            RDBs_out.append(res)
+        res = self.GFF(torch.cat(RDBs_out, 1))
         res += x_head
 
         raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
@@ -149,7 +137,7 @@ class I3Net(nn.Module):
         out[:, :: self.args.upscale] = x
         out = out.permute(0, 2, 3, 1).contiguous()
 
-        return out, flow_list
+        return out
 
 
 if __name__ == "__main__":
