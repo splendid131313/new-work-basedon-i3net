@@ -225,11 +225,11 @@ class RDB(nn.Module):
         return self.LFF(self.convs(x)) + x
 
 class KernelGenerator(nn.Module):
-    def __init__(self, k=3):
+    def __init__(self, in_c, k=3):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Conv2d(1, 32, 3, 1, 1),
+            nn.Conv2d(in_c, 32, 3, 1, 1),
             nn.ReLU(True),
             nn.Conv2d(32, 64, 3, 1, 1),
             nn.ReLU(True),

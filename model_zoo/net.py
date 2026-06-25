@@ -51,7 +51,7 @@ class I3Net(nn.Module):
             ]
         )
 
-        self.kernel_generator = KernelGenerator()
+        self.kernel_generator = KernelGenerator(in_c=2)
         self.dynamic_refine = DynamicRefine(n_feats)
         
         modules_tail = [
@@ -120,7 +120,7 @@ class I3Net(nn.Module):
         # B, T, H, W = x.shape
         warped0, warped1, flow = self._get_align(i_start, i_end)
 
-        flow_mag = torch.norm(flow, dim=1, keepdim=True)
+        # flow_mag = torch.norm(flow, dim=1, keepdim=True)
         
         ##### 第2种使用位置 ####
         # kernel = self.kernel_generator(flow_mag)
@@ -138,7 +138,7 @@ class I3Net(nn.Module):
         res += x_head
 
         ##### 第1种使用位置 #####
-        kernel = self.kernel_generator(flow_mag)
+        kernel = self.kernel_generator(flow)
         res += self.dynamic_refine(res, kernel)
 
         raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
