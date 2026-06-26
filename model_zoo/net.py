@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .i3net.basic_model import default_conv, RDB, KernelGenerator, DynamicRefine
 
 from .flowseek.core.flowseek import FlowSeek
@@ -51,7 +52,7 @@ class I3Net(nn.Module):
             ]
         )
 
-        self.kernel_generator = KernelGenerator(in_c=2)
+        self.kernel_generator = KernelGenerator(in_c=4)
         self.dynamic_refine = DynamicRefine(n_feats)
         
         modules_tail = [
@@ -120,6 +121,19 @@ class I3Net(nn.Module):
         # B, T, H, W = x.shape
         warped0, warped1, flow = self._get_align(i_start, i_end)
 
+        u = flow[:, 0:1]
+        v = flow[:, 1:2]  
+        sobel_x = torch.tensor([[-1,0,1], [-2,0,2], [-1,0,1]], dtype=torch.float32, device=flow.device).view(1,1,3,3)
+        sobel_y = torch.tensor([[-1,-2,-1], [ 0, 0, 0], [ 1, 2, 1]], dtype=torch.float32, device=flow.device).view(1,1,3,3)  
+
+        ux = F.conv2d(u, sobel_x, padding=1)
+        uy = F.conv2d(u, sobel_y, padding=1)
+
+        vx = F.conv2d(v, sobel_x, padding=1)
+        vy = F.conv2d(v, sobel_y, padding=1)
+
+        jacobian = torch.cat([ux, uy, vx, vy], dim=1)
+
         # flow_mag = torch.norm(flow, dim=1, keepdim=True)
         
         ##### 第2种使用位置 ####
@@ -138,7 +152,7 @@ class I3Net(nn.Module):
         res += x_head
 
         ##### 第1种使用位置 #####
-        kernel = self.kernel_generator(flow)
+        kernel = self.kernel_generator(jacobian)
         res += self.dynamic_refine(res, kernel)
 
         raw_output = self.tail(res)  # [B, out_slice * 2, H, W]
