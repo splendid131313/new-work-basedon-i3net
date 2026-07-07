@@ -15,8 +15,9 @@ def add_argument_group(name):
 # Dataset
 data_arg = add_argument_group('Dataset')
 data_arg.add_argument('--data_type', type=str, default='direct')
-data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
-data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/train')
+# data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
+data_arg.add_argument('--max_mid_slices', type=int, default=7, help='动态跨度采样时中间切片数上界n；None则用体积深度-2')
+data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task03_Lung/train')
 data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
 data_arg.add_argument('--image_size', type=int, default=256)
 
@@ -24,7 +25,7 @@ data_arg.add_argument('--image_size', type=int, default=256)
 # Model
 model_arg = add_argument_group('Model')
 model_arg.add_argument('--model', type=str, default='i3net', help='select model')
-model_arg.add_argument('--upscale', type=int, default=2, help='scale_factor')
+# model_arg.add_argument('--upscale', type=int, default=2, help='scale_factor')
 model_arg.add_argument("--resume", type=bool, default=False, help='run resume or not')
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
 model_arg.add_argument("--flow_cfg", type=str, default="flowseek-S.json")
@@ -47,7 +48,7 @@ learn_arg.add_argument('--lr_decay', type=int, default=400)
 learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度')
 #### epoch/bs ####
 learn_arg.add_argument('--batch_size', type=int, default=6)
-learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapling n times of each volume')
+learn_arg.add_argument('--one_batch_n_sample', type=int, default=4, help='smapling n times of each volume')
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
@@ -55,7 +56,7 @@ learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up
 
 # Misc
 misc_arg = add_argument_group('Misc')
-misc_arg.add_argument('--ckpt_dir', type=str, default='colon',help='saved filename')
+misc_arg.add_argument('--ckpt_dir', type=str, default='lung',help='saved filename')
 misc_arg.add_argument('--gpu_id', type=str, default='0,1')
 misc_arg.add_argument('--num_workers', type=int, default=8)
 misc_arg.add_argument('--parallel', type=bool, default=True, help="parallel training")
@@ -72,6 +73,6 @@ def get_args():
     if len(unparsed) > 1:
         print("Unparsed args: {}".format(unparsed))
     
-    args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
+    # args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
     return args, unparsed
 

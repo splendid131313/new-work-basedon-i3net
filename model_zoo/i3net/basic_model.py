@@ -1,5 +1,6 @@
 import torch.nn as nn
 import einops
+import torch
 from functools import partial
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
@@ -110,6 +111,8 @@ class IntraSliceBranch(nn.Module):
         )
         self.idct = IDCT2x()
 
+        self.time_mod = TimeConditionModulation(n_feat)
+
         chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
         self.attn = nn.Sequential(
             PreNormResidual(dim=n_feat, fn=FeedForward(dim=window_size**2, expansion_factor=1, dropout=0, dense=chan_first)), # dim=num_patch
@@ -117,13 +120,15 @@ class IntraSliceBranch(nn.Module):
         )
         self.last_conv = conv(n_feat,n_feat,kernel_size=1,bias=bias)
 
-    def forward(self,x):
+    def forward(self,x, t):
         b,c,h,w = x.shape
         x_dct = self.dct(x)
         x_dct = einops.rearrange(x_dct,'b c h w -> b (h w) c')
         x_dct = self.norm(x_dct)
         x_dct = einops.rearrange(x_dct,'b (h w) c -> b c h w',h=h,w=w)
         x_dct = self.conv(x_dct)
+
+        x_dct = self.time_mod(x_dct, t)
 
         x_dct_windows = window_partitions(x_dct,window_size=self.window_size) # [b,c,h,w]
      
@@ -144,25 +149,43 @@ class I2Block(nn.Module):
     def __init__(
         self, conv, n_feat, kernel_size,
         bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
-        super(I2Block, self).__init__()
+        super(I2Block, self).__init__() 
         inter_slice_branch = [
             nn.PixelUnshuffle(2),
             nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1),
             nn.ReLU(),
             nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1),  # +
             nn.PixelShuffle(2),  # +
-            nn.Conv2d(n_feat, n_feat, 1, 1, 0)
+            nn.Conv2d(n_feat, n_feat, 1, 1, 0),
         ]
         self.inter_slice_branch = nn.Sequential(*inter_slice_branch)
+        # self.unshuffle = nn.PixelUnshuffle(2)
+        # self.inter_conv1 = nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1)
+        # self.act = nn.ReLU(True)
+        # self.inter_time_mod = TimeConditionModulation(4 * n_feat)
+        # self.inter_conv2 = nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1)
+        # self.shuffle = nn.PixelShuffle(2)
+        # self.inter_conv3 = nn.Conv2d(n_feat, n_feat, 1, 1, 0)
 
         self.res_scale = res_scale
 
         self.intra_slice_branch = IntraSliceBranch(conv=nn.Conv2d,n_feat=n_feat,kernel_size=kernel_size,bias=bias
                                   ,head_num=head_num,win_num_sqrt=win_num_sqrt,window_size=window_size)
 
-    def forward(self, x):
+    def forward(self, x, t):
         x_inter = self.inter_slice_branch(x).mul(self.res_scale)
-        x_intra = self.intra_slice_branch(x)
+        # x_intra = self.intra_slice_branch(x)
+        # out = x_inter + x_intra + x
+        # x_inter = self.unshuffle(x)
+        # x_inter = self.act(self.inter_conv1(x_inter))
+        # x_inter = self.inter_time_mod(x_inter, t)
+
+        # x_inter = self.inter_conv2(x_inter)
+        # x_inter = self.shuffle(x_inter)
+        # x_inter = self.inter_conv3(x_inter).mul(self.res_scale)
+
+        x_intra = self.intra_slice_branch(x, t)  # 将 t 传下去
+
         out = x_inter + x_intra + x
         return out
 
@@ -176,10 +199,10 @@ class I2Group(nn.Module):
                             bias, bn, act, res_scale,head_num,win_num_sqrt, window_size) for _ in range(n_depth)]
 
         self.body = nn.ModuleList(body)
-    def forward(self,x):
+    def forward(self,x,t):
         res = x
         for block in self.body:
-            res = block(res)
+            res = block(res, t)
         out = res
         return out
 
@@ -231,3 +254,20 @@ class CrossViewBlock(nn.Module):
         x_cor_f = self.conv_cor(x) # b c h w
         x_out = x_cor_f + x_sag_f
         return x_out
+
+class TimeConditionModulation(nn.Module):
+    """用时间参数 t 动态调制特征图，保持大跨度下的特征响应"""
+
+    def __init__(self, n_feats):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(1, n_feats),
+            nn.ReLU(),
+            nn.Linear(n_feats, n_feats * 2),  # 预测 scale 和 shift
+        )
+
+    def forward(self, x, t):
+        # t: (B, 1)
+        style = self.mlp(t).unsqueeze(-1).unsqueeze(-1)  # (B, 2*C, 1, 1)
+        scale, shift = torch.chunk(style, 2, dim=1)
+        return x * (1 + scale) + shift

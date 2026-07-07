@@ -1,97 +1,111 @@
- # random
-
 import os
+import random
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-import random
-import nibabel as nib
-import random 
+from torch.utils.data import Dataset
 
-import pickle
 import util
 
 
 class trainSet(Dataset):
-    def __init__(self, data_root, args=None,
-                random_crop=None, resize=None, augment_s=True, augment_t=True):
-        self.args = args
-        self.data_root = data_root
-        self.image_size = args.image_size
-        self.folder_list = [(data_root + '/' + f) for f in os.listdir(data_root)]
-        random.shuffle(self.folder_list)
-        
-        self.file_len = len(self.folder_list)
+  def __init__(self, data_root, args=None, random_crop=None, resize=None, augment_s=True, augment_t=True):
+    self.args = args
+    self.data_root = data_root
+    self.image_size = args.image_size
+    self.augment_s = augment_s
+    self.augment_t = augment_t
+    self.random_crop = random_crop
 
-        self.random_crop = random_crop
-        self.augment_s = augment_s
-        self.augment_t = augment_t
-        
+    self.volume_list = [
+      os.path.join(data_root, f)
+      for f in os.listdir(data_root)
+      if f.endswith(".npy")
+    ]
+    random.shuffle(self.volume_list)
+    self.file_len = len(self.volume_list)
 
-    def __getitem__(self, index):
-        volumepath = self.folder_list[index]
-        slice_list = [(volumepath+'/'+f) for f in os.listdir(volumepath) if f.endswith('.npy')]
-        slice_list.sort()
-        
-        def getAVol(slice_list):
-            id = random.randint(0,len(slice_list) - self.args.hr_slice_patch)
-            volume = []
-            for i in range(self.args.hr_slice_patch):
-                # with open(slice_list[id+i], 'rb') as _f: img = pickle.load(_f)
-                # volume.append(img['image'])
-                img = np.load(slice_list[id+i])
-                volume.append(img)
+  def _load_volume(self, volumepath):
+    volume = np.load(volumepath)
+    if volume.ndim == 4:
+      volume = volume[:, :, :, 0]
+    if volume.ndim != 3:
+      raise ValueError(
+        f"expects 3D volume [H,W,Z], got shape {volume.shape} from {volumepath}"
+      )
+    return volume
 
-            volume = np.array(volume,dtype=np.float32).transpose(1,2,0) 
-            volume = util.normalize(volume) # ->[0-1]
-            if random.random() >= 0.5:
-                volume = volume[:,::-1,:].copy()
-            if random.random() >= 0.5:
-                volume = volume[::-1,:,:].copy()
+  def _augment_xy(self, volume):
+    if self.augment_s and random.random() >= 0.5:
+      volume = volume[:, ::-1, :].copy()
+    if self.augment_s and random.random() >= 0.5:
+      volume = volume[::-1, :, :].copy()
+    return volume
 
-            # volume = util.crop_center(volume,256,256) #[256,256,7]
-            # volume = util.resize(volume, self.image_size, self.image_size)
-            volume = util.crop_center(volume, self.image_size, self.image_size)
-            volume=torch.from_numpy(volume)
-            return volume
+  def _sample_dynamic_span(self, volume):
+    z_size = volume.shape[2]
+    n_upper = min(z_size - 2, getattr(self.args, "max_mid_slices", z_size - 2))
+    if n_upper < 1:
+      raise ValueError(f"volume z={z_size} too short for dynamic span (need >= 3 slices)")
 
-        volume = []
-        for i in range(self.args.one_batch_n_sample):
-            volume.append(getAVol(slice_list))
-        volume = torch.stack(volume,0)
-        
-        return volume
+    n_mid = random.randint(1, n_upper)
+    span_len = n_mid + 2
+    z0 = random.randint(0, z_size - span_len)
+    z1 = z0 + n_mid + 1
 
-    def __len__(self):
-        return self.file_len
+    hr_span = volume[:, :, z0:z1+1].astype(np.float32)
+    hr_span = util.normalize(hr_span)
+    hr_span = self._augment_xy(hr_span)
+    hr_span = util.crop_center(hr_span, self.image_size, self.image_size)
+
+    lr = hr_span[:, :, [0, -1]]
+    mid_idx = random.randint(1, n_mid)
+    gt = hr_span[:, :, mid_idx : mid_idx + 1]
+    t = torch.tensor([mid_idx / (n_mid + 1)], dtype=torch.float32)
+
+    return (
+      torch.from_numpy(lr.copy()),
+      torch.from_numpy(gt.copy()),
+      t,
+    )
+
+  def __getitem__(self, index):
+    volume = self._load_volume(self.volume_list[index])
+
+    lr_list, gt_list, t_list = [], [], []
+    for _ in range(self.args.one_batch_n_sample):
+      lr, gt, t = self._sample_dynamic_span(volume)
+      lr_list.append(lr)
+      gt_list.append(gt)
+      t_list.append(t)
+
+    lr = torch.stack(lr_list, 0)
+    gt = torch.stack(gt_list, 0)
+    t = torch.stack(t_list, 0)
+    return lr, gt, t
+
+  def __len__(self):
+    return self.file_len
 
 
 class testSet(Dataset):
-    def __init__(self, data_root, image_size):
-        self.data_root = data_root
-        self.image_size = image_size
-        self.trainlist = [(data_root + '/' + f) for f in os.listdir(data_root)]
+  def __init__(self, data_root, image_size):
+    self.data_root = data_root
+    self.image_size = image_size
+    self.trainlist = [(data_root + "/" + f) for f in os.listdir(data_root)]
 
-        self.file_len = len(self.trainlist)
-         
-    def __getitem__(self, index):
-        volumepath = self.trainlist[index]
-        # with open(volumepath, 'rb') as _f: volumeIn = pickle.load(_f)
-        # volumeIn = volumeIn['image'] #[h,w,s] [0,4095]
-        volumeIn = np.load(volumepath)
-        # volumeIn = util.crop_center(volumeIn,256,256)
-        # volumeIn = util.resize(volumeIn, self.image_size, self.image_size)
-        volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
-        volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
-        volumeIn = volumeIn.astype(np.float32)
-        volumeIn=torch.from_numpy(volumeIn) # w,h,s
-        
-        name = volumepath.split('/')[-1].split('.')[0]
-        return name, volumeIn, np.float32(vmin), np.float32(vmax)  # [h,w,slice]
+    self.file_len = len(self.trainlist)
 
-    def __len__(self):
-        return self.file_len
+  def __getitem__(self, index):
+    volumepath = self.trainlist[index]
+    volumeIn = np.load(volumepath)
+    volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
+    volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
+    volumeIn = volumeIn.astype(np.float32)
+    volumeIn = torch.from_numpy(volumeIn)
 
+    name = volumepath.split("/")[-1].split(".")[0]
+    return name, volumeIn, np.float32(vmin), np.float32(vmax)
 
-
+  def __len__(self):
+    return self.file_len

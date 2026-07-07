@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import compute_reprojection_loss, compute_consistency_loss
+from select_loss import Select_Loss
 
 
 def main():
@@ -44,6 +44,8 @@ def main():
     torch.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed(GLOBAL_SEED + rank)
     torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
+
+    wandb_name = args.ckpt_dir
 
     args.ckpt_dir = "experiments/" + args.ckpt_dir
     if is_main:
@@ -85,15 +87,14 @@ def main():
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_reproj = compute_reprojection_loss
-    loss_cons = compute_consistency_loss
+    loss_function = Select_Loss(args)
 
-    # if is_main:
-    #     wandb.init(
-    #         project="i3net",
-    #         name="flow_module",
-    #         config=args.__dict__,
-    #     )
+    if is_main:
+        wandb.init(
+            project="multi_random",
+            name=wandb_name,
+            config=args.__dict__,
+        )
 
     # amp
     use_amp = args.amp
@@ -104,105 +105,69 @@ def main():
         scaler = None
         autocast = None
 
+    best_psnr = 0
+    last_80_start = int(0.7 * args.max_epoch)
+
     model.train()
     for epoch in range(args.start_epoch, args.max_epoch):
         train_sampler.set_epoch(epoch)
 
         loss_epoch = 0
-        psnr_local_epoch = 0
-        psnr_global_epoch = 0
-        psnr_pred_local_epoch = 0
-        psnr_pred_global_epoch = 0
+        psnr_epoch = 0
 
         if is_main:
             loader_iter = tqdm(enumerate(dataloader), total=len(dataloader))
         else:
             loader_iter = enumerate(dataloader)
 
-        for iter, hr in loader_iter:
-            # hr: [B, N, H, W, S] 或 [B, H, W, S]
-            if len(hr.shape) == 5:
-                gt = torch.cat([i for i in hr], 0)  # [B, H, W, S]
-            else:
-                gt = hr
-            lr = gt[..., :: args.upscale]  # [B, H, W, lr_slice_patch]
-
-            gt = gt.to(device, non_blocking=True)
+        for iter, (lr, gt, t) in loader_iter:
             lr = lr.to(device, non_blocking=True)
+            gt = gt.to(device, non_blocking=True)
+            t = t.to(device, non_blocking=True)
 
             optimizer.zero_grad()
 
             if use_amp:
                 with autocast():
-                    out_local, out_global = model(lr)
-                    loss_iter = loss_reproj(out_local, gt) + loss_reproj(out_global, gt) + loss_cons(out_local, out_global)
+                    out = model(lr, t)
+                    loss_iter = loss_function(out, gt)
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                out_local, out_global = model(lr)
-                loss_iter = loss_reproj(out_local, gt) + loss_reproj(out_global, gt) + loss_cons(out_local, out_global)
+                out = model(lr, t)
+                loss_iter = loss_function(out, gt)
                 loss = loss_iter
                 loss.backward()
                 optimizer.step()
 
             with torch.no_grad():
-                psnr_local_iter = 0.0
-                psnr_global_iter = 0.0
-                psnr_pred_local_iter = 0.0
-                psnr_pred_global_iter = 0.0
-                for bz in range(gt.shape[0]):
-                    psnr_local_iter += calc_psnr(gt[bz, :, :, :], out_local[bz, :, :, :]).item()
-                    psnr_global_iter += calc_psnr(gt[bz, :, :, :], out_global[bz, :, :, :]).item()
-                    psnr_pred_local_iter += calc_psnr(
-                        gt[bz, :, :, 1 :: args.upscale],
-                        out_local[bz, :, :, 1 :: args.upscale],
-                    ).item()
-                    psnr_pred_global_iter += calc_psnr(
-                        gt[bz, :, :, 1 :: args.upscale],
-                        out_global[bz, :, :, 1 :: args.upscale],
-                    ).item()
-                psnr_local_iter /= gt.shape[0]
-                psnr_global_iter /= gt.shape[0]
-                psnr_pred_local_iter /= gt.shape[0]
-                psnr_pred_global_iter /= gt.shape[0]
+                psnr_iter = calc_psnr(gt, out).item()
 
             loss_epoch += loss_iter.detach().item()
-            psnr_local_epoch += psnr_local_iter
-            psnr_global_epoch += psnr_global_iter
-            psnr_pred_local_epoch += psnr_pred_local_iter
-            psnr_pred_global_epoch += psnr_pred_global_iter
+            psnr_epoch += psnr_iter
 
             if is_main:
                 lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
                 log = (
                     f"epoch[{epoch + 1}/{args.max_epoch}] "
                     f"iter[{iter + 1}/{len(dataloader)}] "
-                    f"psnrTrLocal:{psnr_local_iter:.6f} psnrTrGlobal:{psnr_global_iter:.6f} psnrPredLocal:{psnr_pred_local_iter:.6f} psnrPredGlobal:{psnr_pred_global_iter:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+                    f"psnr:{psnr_iter:.6f} loss:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
                 )
                 now = str(datetime.datetime.now())
                 print(now + " " + log)
 
         loss_tensor = torch.tensor(loss_epoch, device=device)
-        psnr_local_tensor = torch.tensor(psnr_local_epoch, device=device)
-        psnr_global_tensor = torch.tensor(psnr_global_epoch, device=device)
-        psnr_pred_local_tensor = torch.tensor(psnr_pred_local_epoch, device=device)
-        psnr_pred_global_tensor = torch.tensor(psnr_pred_global_epoch, device=device)
+        psnr_tensor = torch.tensor(psnr_epoch, device=device)
         count_tensor = torch.tensor(len(dataloader), device=device, dtype=torch.float32)
 
         dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_local_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_global_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_pred_local_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_pred_global_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(psnr_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
 
         loss_epoch = (loss_tensor / count_tensor).item()
-        psnr_local_epoch = (psnr_local_tensor / count_tensor).item()
-        psnr_global_epoch = (psnr_global_tensor / count_tensor).item()
-        psnr_pred_local_epoch = (psnr_pred_local_tensor / count_tensor).item()
-        psnr_pred_global_epoch = (psnr_pred_global_tensor / count_tensor).item()
+        psnr_epoch = (psnr_tensor / count_tensor).item()
 
         if args.schedule == "step":
             scheduler.step()
@@ -211,55 +176,46 @@ def main():
         elif args.schedule == "Tmin":
             scheduler.step(loss_epoch)
         elif args.schedule == "Tmax":
-            scheduler.step(psnr_local_epoch)
+            scheduler.step(loss_epoch)
 
         if is_main:
             lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
 
             with torch.no_grad():
-                b, h, w, s = gt.shape
-                mid_s = s // 2
-                out_local = torch.clamp(out_local, 0, 1)
-                out_global = torch.clamp(out_global, 0, 1)
+                out = torch.clamp(out, 0, 1)
                 gt = torch.clamp(gt, 0, 1)
-                out_local_mid = out_local[0, :, :, mid_s].detach().cpu().float().numpy()
-                out_global_mid = (
-                    out_global[0, :, :, mid_s].detach().cpu().float().numpy()
-                )
-                gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
 
                 wandb.log(
                     {
-                        "train/psnr_local_epoch": psnr_local_epoch,
-                        "train/psnr_global_epoch": psnr_global_epoch,
-                        "train/psnr_pred_local_epoch": psnr_pred_local_epoch,
-                        "train/psnr_pred_global_epoch": psnr_pred_global_epoch,
+                        "train/psnr_epoch": psnr_epoch,
                         "train/loss_epoch": loss_epoch,
                         "train/lr": lr_tmp,
                         "epoch": epoch,
-                        "vis/out_local": wandb.Image(out_local_mid, caption="Local pred"),
-                        "vis/out_global": wandb.Image(out_global_mid, caption="Global pred"),
-                        "vis/gt": wandb.Image(gt_mid, caption="GT"),
+                        "vis/out": wandb.Image(out, caption="Pred"),
+                        "vis/gt": wandb.Image(gt, caption="GT"),
                     }
                 )
 
             log = (
                 f"epoch[{epoch + 1}/{args.max_epoch}] "
-                f"psnrTrLocal:{psnr_local_epoch:.6f} psnrTrGlobal:{psnr_global_epoch:.6f} psnrPredLocal:{psnr_pred_local_epoch:.6f} psnrPredGlobal:{psnr_pred_global_epoch:.6f} lossTr:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+                f"psnr:{psnr_epoch:.6f} loss:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
             )
             now = str(datetime.datetime.now())
             print(now + " " + log)
 
-            if epoch + 1 > int(0.99 * args.max_epoch):
-                os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
-                state_dict = model.module.state_dict()  # DDP
-                torch.save(
-                    {"epoch": epoch + 1, "state_dict": state_dict},
-                    args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
-                )
+            os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
 
-    # if is_main:
-    #     wandb.finish()
+            if epoch + 1 > last_80_start and psnr_epoch > best_psnr:
+                best_psnr = psnr_epoch
+                state_dict = model.module.state_dict()
+                torch.save(
+                    state_dict,
+                    args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
+                )
+                print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
+
+    if is_main:
+        wandb.finish()
 
     dist.destroy_process_group()
 

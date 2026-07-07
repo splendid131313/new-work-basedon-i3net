@@ -2,6 +2,17 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+class Select_Loss(nn.Module):
+    def __init__(self, args):
+        super(Select_Loss, self).__init__()
+        self.args = args
+        self.l1loss = nn.L1Loss()
+
+    def forward(self, sr, gt):
+        l1loss = self.l1loss(sr, gt)
+        loss = l1loss
+        return loss
+
 class SSIM(nn.Module):
     """Layer to compute the SSIM loss between a pair of images
     """
