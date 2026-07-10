@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 import torch.nn as nn
 # from .i3net.basic_model import default_conv, I2Group, CrossViewBlock, TimeConditionModulation
 # from .flowseek.core.flowseek import FlowSeek
@@ -24,6 +24,7 @@ class ContinuousNet(nn.Module):
         head_num = args.head_num
         win_num_sqrt = args.win_num_sqrt
         window_size = args.image_size // args.win_num_sqrt
+        self.cond_dim = 2
         self.head = nn.Sequential(
             conv(4, n_feats, kernel_size),
             nn.ReLU(),
@@ -39,13 +40,13 @@ class ContinuousNet(nn.Module):
 
         # 2. 光流残差修正网络：应对大形变/大倍率导致的非线性轨迹
         self.flow_refine = nn.Sequential(
-            conv(2 + 1, n_feats, kernel_size),  # 输入: 粗光流(2ch) + 时间t(1ch)
+            conv(2 + self.cond_dim, n_feats, kernel_size),
             nn.ReLU(),
             conv(n_feats, 2, kernel_size),  # 输出: 光流残差修正量
         )
 
         # 3. 特征调制层
-        self.mod1 = TimeConditionModulation(n_feats)
+        self.mod1 = TimeConditionModulation(n_feats, cond_dim=self.cond_dim)
         # self.mod2 = TimeConditionModulation(n_feats)
 
         modules_body = [
@@ -59,6 +60,7 @@ class ContinuousNet(nn.Module):
                 head_num=head_num,
                 win_num_sqrt=win_num_sqrt,
                 window_size=window_size,
+                cond_dim=self.cond_dim,
             )
             for _ in range(num_blocks // 2)
         ]
@@ -96,19 +98,30 @@ class ContinuousNet(nn.Module):
             flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
         
         return flow01, flow10
+
+    def _prepare_cond(self, cond, batch_size, device, dtype):
+        cond = cond.to(device=device, dtype=dtype).view(batch_size, -1)
+        if cond.shape[1] == 1:
+            cond = torch.cat([cond, torch.ones_like(cond)], dim=1)
+        return cond[:, : self.cond_dim]
     
-    def _get_continuous_flow(self, img0, flow01, flow10, t):
+    def _get_continuous_flow(self, img0, flow01, flow10, cond):
         B, _, H, W = img0.shape
+        cond = self._prepare_cond(cond, B, img0.device, img0.dtype)
+        t = cond[:, :1]
 
         t_tensor = t.view(B, 1, 1, 1).expand(-1, -1, H, W)
+        cond_tensor = cond.view(B, self.cond_dim, 1, 1).expand(-1, -1, H, W)
 
         # 基础线性流
         base_flow0t = flow01 * t.view(B, 1, 1, 1)
         base_flow1t = flow10 * (1.0 - t.view(B, 1, 1, 1))
 
         # 非线性修正
-        feat_0t = torch.cat([base_flow0t, t_tensor], dim=1)
-        feat_1t = torch.cat([base_flow1t, 1.0 - t_tensor], dim=1)
+        cond_1t = cond_tensor.clone()
+        cond_1t[:, :1] = 1.0 - t_tensor
+        feat_0t = torch.cat([base_flow0t, cond_tensor], dim=1)
+        feat_1t = torch.cat([base_flow1t, cond_1t], dim=1)
 
         delta_flow0t = self.flow_refine(feat_0t)
         delta_flow1t = self.flow_refine(feat_1t)
@@ -123,7 +136,9 @@ class ContinuousNet(nn.Module):
         # img0, img1: (B, 1, H, W)
         # t: (B, 1)
 
-        flow0t, flow1t = self._get_continuous_flow(img0, flow01, flow10, t)
+        B = img0.shape[0]
+        cond = self._prepare_cond(t, B, img0.device, img0.dtype)
+        flow0t, flow1t = self._get_continuous_flow(img0, flow01, flow10, cond)
 
         warped0 = warp(img0, -flow0t)
         warped1 = warp(img1, -flow1t)
@@ -131,7 +146,7 @@ class ContinuousNet(nn.Module):
         x_in = torch.cat([img0, img1, warped0, warped1], dim=1)
         feat = self.head(x_in)
 
-        feat = self.mod1(feat, t)
+        feat = self.mod1(feat, cond)
         res = feat
 
         align_list = []
@@ -139,7 +154,7 @@ class ContinuousNet(nn.Module):
         align_list.append(res)
 
         for id, layer in enumerate(self.body):
-            res = layer(res, t)
+            res = layer(res, cond)
             if id in [3, 7]:
                 # res = self.alignment[id // 4 + 1](res) + res
                 align_list.append(res)
@@ -168,13 +183,16 @@ class ContinuousNet(nn.Module):
             for i in range(T_in - 1):
                 img0 = x[:, i : i + 1]
                 img1 = x[:, i + 1 : i + 2]
-                img0 = self._vol_to_rgb(img0)
-                img1 = self._vol_to_rgb(img1)
                 flow01, flow10 = self._get_base_flow(img0, img1)
                 out_volume.append(img0)
 
+                gap = len(t_list) + 1
+                max_gap = max(1, int(getattr(self.args, "max_mid_slices", gap)) + 1)
+                gap_norm = min(float(gap) / float(max_gap), 1.0)
                 for t_val in t_list:
-                    t_tensor = torch.full((B, 1), t_val, device=x.device, dtype=x.dtype)
+                    t_tensor = torch.tensor(
+                        [t_val, gap_norm], device=x.device, dtype=x.dtype
+                    ).view(1, self.cond_dim).expand(B, -1)
                     out_t = self.forward_single_t(img0, img1, flow01, flow10, t_tensor)
                     out_volume.append(out_t)
             out_volume.append(x[:, -1:])
@@ -187,23 +205,41 @@ if __name__ == "__main__":
 
     from flowseek.config.parser import parse_args
 
-    def mock_train_batch(batch_size, image_size, z_size=30, max_mid_slices=5, device="cuda"):
-        """模拟 data.py __getitem__ 返回的 (lr, gt, t)。"""
+    def mock_train_batch(
+        batch_size,
+        image_size,
+        z_size=30,
+        max_mid_slices=5,
+        targets_per_span=2,
+        device="cuda",
+    ):
+        # Mock data.py __getitem__ output: (lr, gt, cond).
         lr_list, gt_list, t_list = [], [], []
+        targets_per_span = max(1, int(targets_per_span))
+        max_gap = max(1, int(max_mid_slices) + 1)
+
         for _ in range(batch_size):
             n_upper = min(z_size - 2, max_mid_slices)
             n_mid = random.randint(1, n_upper)
             span_len = n_mid + 2
 
             hr_span = torch.rand(image_size, image_size, span_len)
-            lr = hr_span[:, :, [0, -1]]
-            mid_idx = random.randint(1, n_mid)
-            gt = hr_span[:, :, mid_idx : mid_idx + 1]
-            t = torch.tensor([mid_idx / (n_mid + 1)], dtype=torch.float32)
+            lr_base = hr_span[:, :, [0, -1]]
+            gap = n_mid + 1
+            gap_norm = min(float(gap) / float(max_gap), 1.0)
 
-            lr_list.append(lr)
-            gt_list.append(gt)
-            t_list.append(t)
+            all_mid = list(range(1, n_mid + 1))
+            if targets_per_span <= n_mid:
+                mid_indices = random.sample(all_mid, targets_per_span)
+            else:
+                mid_indices = [random.choice(all_mid) for _ in range(targets_per_span)]
+
+            for mid_idx in mid_indices:
+                lr_list.append(lr_base)
+                gt_list.append(hr_span[:, :, mid_idx : mid_idx + 1])
+                t_list.append(
+                    torch.tensor([mid_idx / gap, gap_norm], dtype=torch.float32)
+                )
 
         lr = torch.stack(lr_list, 0).to(device)
         gt = torch.stack(gt_list, 0).to(device)
@@ -220,12 +256,12 @@ if __name__ == "__main__":
     args.kernel_size = 3
     args.res_scale = 1
     args.i_num_blocks = 16
-    args.hr_slice_patch = 1
     args.head_num = 1
     args.win_num_sqrt = 16
     args.image_size = 256
-    args.batch_size = 2
+    args.batch_size = 1
     args.max_mid_slices = 5
+    args.targets_per_span = 2
 
     device = torch.device("cuda", 0)
     model = ContinuousNet(args).to(device)
@@ -236,11 +272,13 @@ if __name__ == "__main__":
         image_size=args.image_size,
         z_size=30,
         max_mid_slices=args.max_mid_slices,
+        targets_per_span=args.targets_per_span,
         device=device,
     )
     out = model(lr, t)
 
-    print(f"lr:  {lr.shape}")   # [B, H, W, 2]
-    print(f"gt:  {gt.shape}")   # [B, H, W, 1]
-    print(f"t:   {t.shape}")    # [B, 1]
+    print(f"lr:  {lr.shape}")   # [B * targets_per_span, H, W, 2]
+    print(f"gt:  {gt.shape}")   # [B * targets_per_span, H, W, 1]
+    print(f"t:   {t.shape}")    # [B * targets_per_span, 2]
     print(f"out: {out.shape}")  # [B, H, W, 1]
+

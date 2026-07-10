@@ -48,7 +48,11 @@ class trainSet(Dataset):
     if n_upper < 1:
       raise ValueError(f"volume z={z_size} too short for dynamic span (need >= 3 slices)")
 
-    n_mid = random.randint(1, n_upper)
+    large_gap_prob = float(getattr(self.args, "large_gap_prob", 0.0))
+    if n_upper > 1 and random.random() < large_gap_prob:
+      n_mid = random.randint(max(1, (n_upper + 1) // 2), n_upper)
+    else:
+      n_mid = random.randint(1, n_upper)
     span_len = n_mid + 2
     z0 = random.randint(0, z_size - span_len)
     z1 = z0 + n_mid + 1
@@ -58,15 +62,28 @@ class trainSet(Dataset):
     hr_span = self._augment_xy(hr_span)
     hr_span = util.crop_center(hr_span, self.image_size, self.image_size)
 
-    lr = hr_span[:, :, [0, -1]]
-    mid_idx = random.randint(1, n_mid)
-    gt = hr_span[:, :, mid_idx : mid_idx + 1]
-    t = torch.tensor([mid_idx / (n_mid + 1)], dtype=torch.float32)
+    targets_per_span = max(1, int(getattr(self.args, "targets_per_span", 1)))
+    all_mid = list(range(1, n_mid + 1))
+    if targets_per_span <= n_mid:
+      mid_indices = random.sample(all_mid, targets_per_span)
+    else:
+      mid_indices = [random.choice(all_mid) for _ in range(targets_per_span)]
+
+    gap = n_mid + 1
+    max_gap = max(1, int(getattr(self.args, "max_mid_slices", n_upper)) + 1)
+    gap_norm = min(float(gap) / float(max_gap), 1.0)
+
+    lr_base = hr_span[:, :, [0, -1]]
+    lr_list, gt_list, cond_list = [], [], []
+    for mid_idx in mid_indices:
+      lr_list.append(torch.from_numpy(lr_base.copy()))
+      gt_list.append(torch.from_numpy(hr_span[:, :, mid_idx : mid_idx + 1].copy()))
+      cond_list.append(torch.tensor([mid_idx / gap, gap_norm], dtype=torch.float32))
 
     return (
-      torch.from_numpy(lr.copy()),
-      torch.from_numpy(gt.copy()),
-      t,
+      torch.stack(lr_list, 0),
+      torch.stack(gt_list, 0),
+      torch.stack(cond_list, 0),
     )
 
   def __getitem__(self, index):
@@ -79,9 +96,9 @@ class trainSet(Dataset):
       gt_list.append(gt)
       t_list.append(t)
 
-    lr = torch.stack(lr_list, 0)
-    gt = torch.stack(gt_list, 0)
-    t = torch.stack(t_list, 0)
+    lr = torch.cat(lr_list, 0)
+    gt = torch.cat(gt_list, 0)
+    t = torch.cat(t_list, 0)
     return lr, gt, t
 
   def __len__(self):

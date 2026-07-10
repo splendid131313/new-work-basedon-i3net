@@ -125,6 +125,12 @@ def main():
             gt = gt.to(device, non_blocking=True)
             t = t.to(device, non_blocking=True)
 
+            if lr.ndim == 5:
+                B, N, H, W, C = lr.shape
+                lr = lr.view(B * N, H, W, C)
+                gt = gt.view(B * N, H, W, gt.shape[-1])
+                t = t.view(B * N, t.shape[-1])
+
             optimizer.zero_grad()
 
             if use_amp:

@@ -96,7 +96,7 @@ class GDFN(nn.Module):
 #####################################################################
 class IntraSliceBranch(nn.Module):
     def __init__(self,conv=nn.Conv2d,n_feat=64,kernel_size=3,bias=True,
-                 head_num=1, win_num_sqrt=16, window_size=16):
+                 head_num=1, win_num_sqrt=16, window_size=16, cond_dim=2):
         super().__init__()
 
         self.window_size = window_size
@@ -111,7 +111,7 @@ class IntraSliceBranch(nn.Module):
         )
         self.idct = IDCT2x()
 
-        self.time_mod = TimeConditionModulation(n_feat)
+        self.time_mod = TimeConditionModulation(n_feat, cond_dim=cond_dim)
 
         chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
         self.attn = nn.Sequential(
@@ -148,7 +148,7 @@ class IntraSliceBranch(nn.Module):
 class I2Block(nn.Module):
     def __init__(
         self, conv, n_feat, kernel_size,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
+        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16, cond_dim=2):
         super(I2Block, self).__init__() 
         inter_slice_branch = [
             nn.PixelUnshuffle(2),
@@ -170,7 +170,7 @@ class I2Block(nn.Module):
         self.res_scale = res_scale
 
         self.intra_slice_branch = IntraSliceBranch(conv=nn.Conv2d,n_feat=n_feat,kernel_size=kernel_size,bias=bias
-                                  ,head_num=head_num,win_num_sqrt=win_num_sqrt,window_size=window_size)
+                                  ,head_num=head_num,win_num_sqrt=win_num_sqrt,window_size=window_size,cond_dim=cond_dim)
 
     def forward(self, x, t):
         x_inter = self.inter_slice_branch(x).mul(self.res_scale)
@@ -184,7 +184,7 @@ class I2Block(nn.Module):
         # x_inter = self.shuffle(x_inter)
         # x_inter = self.inter_conv3(x_inter).mul(self.res_scale)
 
-        x_intra = self.intra_slice_branch(x, t)  # 将 t 传下去
+        x_intra = self.intra_slice_branch(x, t)
 
         out = x_inter + x_intra + x
         return out
@@ -192,11 +192,11 @@ class I2Block(nn.Module):
 class I2Group(nn.Module):
     def __init__(
         self, conv, n_depth, n_feat, kernel_size,skip_connect=False,
-        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16):
+        bias=True, bn=False, act=nn.ReLU(True), res_scale=1,head_num=1,win_num_sqrt=16,window_size=16, cond_dim=2):
         super().__init__()
 
         body = [I2Block(conv, n_feat, kernel_size,
-                            bias, bn, act, res_scale,head_num,win_num_sqrt, window_size) for _ in range(n_depth)]
+                            bias, bn, act, res_scale,head_num,win_num_sqrt, window_size, cond_dim=cond_dim) for _ in range(n_depth)]
 
         self.body = nn.ModuleList(body)
     def forward(self,x,t):
@@ -258,16 +258,24 @@ class CrossViewBlock(nn.Module):
 class TimeConditionModulation(nn.Module):
     """用时间参数 t 动态调制特征图，保持大跨度下的特征响应"""
 
-    def __init__(self, n_feats):
+    def __init__(self, n_feats, cond_dim=2):
         super().__init__()
+        self.cond_dim = cond_dim
         self.mlp = nn.Sequential(
-            nn.Linear(1, n_feats),
+            nn.Linear(cond_dim, n_feats),
             nn.ReLU(),
             nn.Linear(n_feats, n_feats * 2),  # 预测 scale 和 shift
         )
 
+        last = self.mlp[-1]
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias) 
+
     def forward(self, x, t):
         # t: (B, 1)
+        t = t.to(device=x.device, dtype=x.dtype).view(x.shape[0], -1)
+        if t.shape[1] == 1 and self.cond_dim == 2:
+            t = torch.cat([t, torch.ones_like(t)], dim=1)
         style = self.mlp(t).unsqueeze(-1).unsqueeze(-1)  # (B, 2*C, 1, 1)
         scale, shift = torch.chunk(style, 2, dim=1)
         return x * (1 + scale) + shift

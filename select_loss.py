@@ -7,10 +7,17 @@ class Select_Loss(nn.Module):
         super(Select_Loss, self).__init__()
         self.args = args
         self.l1loss = nn.L1Loss()
+        self.ssim = SSIM()
+        self.ssim_weight = float(getattr(args, "ssim_loss_weight", 0.1))
+        self.charbonnier_eps = float(getattr(args, "charbonnier_eps", 1e-3))
 
     def forward(self, sr, gt):
-        l1loss = self.l1loss(sr, gt)
-        loss = l1loss
+        charbonnier = torch.sqrt((sr - gt) ** 2 + self.charbonnier_eps ** 2).mean()
+        loss = charbonnier
+        if self.ssim_weight > 0 and sr.ndim == 4:
+            sr_nchw = sr.permute(0, 3, 1, 2).contiguous()
+            gt_nchw = gt.permute(0, 3, 1, 2).contiguous()
+            loss = loss + self.ssim_weight * self.ssim(sr_nchw, gt_nchw).mean()
         return loss
 
 class SSIM(nn.Module):
