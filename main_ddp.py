@@ -135,15 +135,17 @@ def main():
 
             if use_amp:
                 with autocast():
-                    out = model(lr, t)
-                    loss_iter = loss_function(out, gt)
+                    model_out = model(lr, t, gt=gt)
+                    loss_iter = loss_function(model_out, gt)
+                    out = model_out["out"] if isinstance(model_out, dict) else model_out
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                out = model(lr, t)
-                loss_iter = loss_function(out, gt)
+                model_out = model(lr, t, gt=gt)
+                loss_iter = loss_function(model_out, gt)
+                out = model_out["out"] if isinstance(model_out, dict) else model_out
                 loss = loss_iter
                 loss.backward()
                 optimizer.step()

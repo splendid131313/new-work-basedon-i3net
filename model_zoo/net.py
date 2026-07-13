@@ -98,16 +98,9 @@ class ContinuousNet(nn.Module):
             flow10 = self.flowseek(img1, img0, test_mode=True)["final"]
         
         return flow01, flow10
-
-    def _prepare_cond(self, cond, batch_size, device, dtype):
-        cond = cond.to(device=device, dtype=dtype).view(batch_size, -1)
-        if cond.shape[1] == 1:
-            cond = torch.cat([cond, torch.ones_like(cond)], dim=1)
-        return cond[:, : self.cond_dim]
     
     def _get_continuous_flow(self, img0, flow01, flow10, cond):
         B, _, H, W = img0.shape
-        cond = self._prepare_cond(cond, B, img0.device, img0.dtype)
         t = cond[:, :1]
 
         t_tensor = t.view(B, 1, 1, 1).expand(-1, -1, H, W)
@@ -132,12 +125,11 @@ class ContinuousNet(nn.Module):
 
         return final_flow0t, final_flow1t
     
-    def forward_single_t(self, img0, img1, flow01, flow10, t):
+    def forward_single_t(self, img0, img1, flow01, flow10, cond):
         # img0, img1: (B, 1, H, W)
-        # t: (B, 1)
+        # cond: (B, 2)
 
         B = img0.shape[0]
-        cond = self._prepare_cond(t, B, img0.device, img0.dtype)
         flow0t, flow1t = self._get_continuous_flow(img0, flow01, flow10, cond)
 
         warped0 = warp(img0, -flow0t)
@@ -167,14 +159,77 @@ class ContinuousNet(nn.Module):
         delta = raw_output[:, 1:, :, :]
 
         out = mask * warped0 + (1 - mask) * warped1 + delta
-        return out
+        return out, mask
+
+    def _build_mask_prior_aux(self, mask, cond):
+        weight = float(getattr(self.args, "mask_prior_loss_weight", 0.0))
+        if weight <= 0:
+            return None
+
+        t = cond[:, :1]
+        target_mask = 1.0 - t
+        mask_mean = mask.mean(dim=(2, 3))
+        return {
+            "mask_mean": mask_mean,
+            "target_mask": target_mask,
+        }
+
+    def _build_near_anchor_aux(self, pred, img0, img1, gt, cond):
+        weight = float(getattr(self.args, "near_anchor_loss_weight", 0.0))
+        if weight <= 0 or gt is None:
+            return None
+
+        B = pred.shape[0]
+        t = cond[:, 0]
+        threshold = float(getattr(self.args, "near_anchor_threshold", 0.35))
+        left_mask = t <= threshold
+        right_mask = t >= (1.0 - threshold)
+
+        near_pred, near_target = [], []
+
+        if left_mask.any():
+            pred_l = pred[left_mask]
+            gt_l = gt[left_mask]
+            img0_l = img0[left_mask]
+            flow_t0, _ = self._get_base_flow(gt_l, img0_l)
+            near_pred.append(warp(pred_l, -flow_t0))
+            near_target.append(img0_l)
+
+        if right_mask.any():
+            pred_r = pred[right_mask]
+            gt_r = gt[right_mask]
+            img1_r = img1[right_mask]
+            flow_t1, _ = self._get_base_flow(gt_r, img1_r)
+            near_pred.append(warp(pred_r, -flow_t1))
+            near_target.append(img1_r)
+
+        if not near_pred:
+            return None
+
+        return {
+            "near_pred": torch.cat(near_pred, dim=0),
+            "near_target": torch.cat(near_target, dim=0),
+        }
     
-    def forward(self, x, t_list=None):
+    def forward(self, x, cond, gt=None):
         x = x.permute(0, 3, 1, 2).contiguous()
         if self.training:
             flow01, flow10 = self._get_base_flow(x[:, 0:1], x[:, 1:2])
-            out = self.forward_single_t(x[:, 0:1], x[:, 1:2], flow01, flow10, t_list)
+            out, mask = self.forward_single_t(x[:, 0:1], x[:, 1:2], flow01, flow10, cond)
+            aux = {}
+            mask_prior = self._build_mask_prior_aux(mask, cond)
+            if mask_prior is not None:
+                aux["mask_prior"] = mask_prior
+            if gt is not None:
+                gt_nchw = gt.permute(0, 3, 1, 2).contiguous()
+                near_anchor = self._build_near_anchor_aux(
+                    out, x[:, 0:1], x[:, 1:2], gt_nchw, cond
+                )
+                if near_anchor is not None:
+                    aux.update(near_anchor)
             out = out.permute(0, 2, 3, 1).contiguous()
+            if aux:
+                return {"out": out, "aux": aux}
             return out
         else:
             B, T_in, H, W = x.shape
@@ -186,14 +241,14 @@ class ContinuousNet(nn.Module):
                 flow01, flow10 = self._get_base_flow(img0, img1)
                 out_volume.append(img0)
 
-                gap = len(t_list) + 1
+                gap = len(cond) + 1
                 max_gap = max(1, int(getattr(self.args, "max_mid_slices", gap)) + 1)
                 gap_norm = min(float(gap) / float(max_gap), 1.0)
-                for t_val in t_list:
+                for t_val in cond:
                     t_tensor = torch.tensor(
                         [t_val, gap_norm], device=x.device, dtype=x.dtype
                     ).view(1, self.cond_dim).expand(B, -1)
-                    out_t = self.forward_single_t(img0, img1, flow01, flow10, t_tensor)
+                    out_t, _ = self.forward_single_t(img0, img1, flow01, flow10, t_tensor)
                     out_volume.append(out_t)
             out_volume.append(x[:, -1:])
             return torch.cat(out_volume, dim=1)
@@ -208,7 +263,6 @@ if __name__ == "__main__":
     def mock_train_batch(
         batch_size,
         image_size,
-        z_size=30,
         max_mid_slices=5,
         targets_per_span=2,
         device="cuda",
@@ -219,7 +273,7 @@ if __name__ == "__main__":
         max_gap = max(1, int(max_mid_slices) + 1)
 
         for _ in range(batch_size):
-            n_upper = min(z_size - 2, max_mid_slices)
+            n_upper = max_mid_slices
             n_mid = random.randint(1, n_upper)
             span_len = n_mid + 2
 
@@ -234,17 +288,19 @@ if __name__ == "__main__":
             else:
                 mid_indices = [random.choice(all_mid) for _ in range(targets_per_span)]
 
+
             for mid_idx in mid_indices:
                 lr_list.append(lr_base)
                 gt_list.append(hr_span[:, :, mid_idx : mid_idx + 1])
                 t_list.append(
                     torch.tensor([mid_idx / gap, gap_norm], dtype=torch.float32)
                 )
+                print(f"t_list: {t_list}")
 
         lr = torch.stack(lr_list, 0).to(device)
         gt = torch.stack(gt_list, 0).to(device)
         t = torch.stack(t_list, 0).to(device)
-        return lr, gt, t
+        return lr, gt, t    
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -260,7 +316,7 @@ if __name__ == "__main__":
     args.win_num_sqrt = 16
     args.image_size = 256
     args.batch_size = 1
-    args.max_mid_slices = 5
+    args.max_mid_slices = 11
     args.targets_per_span = 2
 
     device = torch.device("cuda", 0)
@@ -270,15 +326,15 @@ if __name__ == "__main__":
     lr, gt, t = mock_train_batch(
         batch_size=args.batch_size,
         image_size=args.image_size,
-        z_size=30,
         max_mid_slices=args.max_mid_slices,
         targets_per_span=args.targets_per_span,
         device=device,
     )
-    out = model(lr, t)
+    out = model(lr, t, gt)
 
     print(f"lr:  {lr.shape}")   # [B * targets_per_span, H, W, 2]
     print(f"gt:  {gt.shape}")   # [B * targets_per_span, H, W, 1]
     print(f"t:   {t.shape}")    # [B * targets_per_span, 2]
+    print(t[:, :1])
     print(f"out: {out.shape}")  # [B, H, W, 1]
 

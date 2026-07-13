@@ -8,16 +8,34 @@ class Select_Loss(nn.Module):
         self.args = args
         self.l1loss = nn.L1Loss()
         self.ssim = SSIM()
-        self.ssim_weight = float(getattr(args, "ssim_loss_weight", 0.1))
+        self.ssim_weight = float(getattr(args, "ssim_loss_weight", 0.0))
         self.charbonnier_eps = float(getattr(args, "charbonnier_eps", 1e-3))
+        self.near_anchor_weight = float(getattr(args, "near_anchor_loss_weight", 0.0))
+        self.mask_prior_weight = float(getattr(args, "mask_prior_loss_weight", 0.0))
+
+    def _charbonnier(self, pred, target):
+        return torch.sqrt((pred - target) ** 2 + self.charbonnier_eps ** 2).mean()
 
     def forward(self, sr, gt):
-        charbonnier = torch.sqrt((sr - gt) ** 2 + self.charbonnier_eps ** 2).mean()
-        loss = charbonnier
+        aux = None
+        if isinstance(sr, dict):
+            aux = sr.get("aux")
+            sr = sr["out"]
+
+        loss = self._charbonnier(sr, gt)
         if self.ssim_weight > 0 and sr.ndim == 4:
             sr_nchw = sr.permute(0, 3, 1, 2).contiguous()
             gt_nchw = gt.permute(0, 3, 1, 2).contiguous()
             loss = loss + self.ssim_weight * self.ssim(sr_nchw, gt_nchw).mean()
+        if self.near_anchor_weight > 0 and aux is not None and "near_pred" in aux:
+            loss = loss + self.near_anchor_weight * self._charbonnier(
+                aux["near_pred"], aux["near_target"]
+            )
+        if self.mask_prior_weight > 0 and aux is not None and "mask_prior" in aux:
+            mp = aux["mask_prior"]
+            loss = loss + self.mask_prior_weight * torch.abs(
+                mp["mask_mean"] - mp["target_mask"]
+            ).mean()
         return loss
 
 class SSIM(nn.Module):
@@ -52,21 +70,3 @@ class SSIM(nn.Module):
 
         return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)
 
-def compute_reprojection_loss(pred, target):
-    """Computes reprojection loss between a batch of predicted and target images
-    """
-    abs_diff = torch.abs(target - pred)
-    l1_loss = abs_diff.mean(1, True)
-
-    ssim = SSIM().to(pred.device, pred.dtype)
-    ssim_loss = ssim(pred, target).mean(1, True)
-    reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
-
-    return reprojection_loss.mean()
-
-def compute_consistency_loss(pred_local, pred_global):
-    B, H, W, T = pred_local.shape
-
-    loss_cons = F.l1_loss(pred_local[..., T//2], pred_global[..., T//2])
-
-    return loss_cons

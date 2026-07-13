@@ -159,13 +159,6 @@ class I2Block(nn.Module):
             nn.Conv2d(n_feat, n_feat, 1, 1, 0),
         ]
         self.inter_slice_branch = nn.Sequential(*inter_slice_branch)
-        # self.unshuffle = nn.PixelUnshuffle(2)
-        # self.inter_conv1 = nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1)
-        # self.act = nn.ReLU(True)
-        # self.inter_time_mod = TimeConditionModulation(4 * n_feat)
-        # self.inter_conv2 = nn.Conv2d(4 * n_feat, 4 * n_feat, 3, 1, 1)
-        # self.shuffle = nn.PixelShuffle(2)
-        # self.inter_conv3 = nn.Conv2d(n_feat, n_feat, 1, 1, 0)
 
         self.res_scale = res_scale
 
@@ -174,15 +167,6 @@ class I2Block(nn.Module):
 
     def forward(self, x, t):
         x_inter = self.inter_slice_branch(x).mul(self.res_scale)
-        # x_intra = self.intra_slice_branch(x)
-        # out = x_inter + x_intra + x
-        # x_inter = self.unshuffle(x)
-        # x_inter = self.act(self.inter_conv1(x_inter))
-        # x_inter = self.inter_time_mod(x_inter, t)
-
-        # x_inter = self.inter_conv2(x_inter)
-        # x_inter = self.shuffle(x_inter)
-        # x_inter = self.inter_conv3(x_inter).mul(self.res_scale)
 
         x_intra = self.intra_slice_branch(x, t)
 
