@@ -89,9 +89,9 @@ def main():
         lr_mid = lr_mid.unsqueeze(0).cuda() #[1,s,h,w]
         lr_surplus = lr_surplus.unsqueeze(0).cuda() #[1,s,h,w]
         with torch.no_grad():
-            sr_mid = model(lr_mid, t_list_mid) #[1,s,h,w]
+            sr_mid = model.inference(lr_mid, t_list_mid) #[1,s,h,w]
             if surplus_with_interpolation:
-                sr_surplus = model(lr_surplus, t_list_surplus) #[1,s,h,w]
+                sr_surplus = model.inference(lr_surplus, t_list_surplus) #[1,s,h,w]
             else:
                 sr_surplus = lr_surplus
         

@@ -133,18 +133,23 @@ def main():
 
             optimizer.zero_grad()
 
+            flow_fn = model.module.flow_estimator._get_base_flow
             if use_amp:
                 with autocast():
-                    model_out = model(lr, t, gt=gt)
-                    loss_iter = loss_function(model_out, gt)
+                    model_out = model(lr, t)
+                    loss_iter = loss_function(
+                        model_out, gt, cond=t, lr=lr, flow_fn=flow_fn
+                    )
                     out = model_out["out"] if isinstance(model_out, dict) else model_out
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                model_out = model(lr, t, gt=gt)
-                loss_iter = loss_function(model_out, gt)
+                model_out = model(lr, t)
+                loss_iter = loss_function(
+                    model_out, gt, cond=t, lr=lr, flow_fn=flow_fn
+                )
                 out = model_out["out"] if isinstance(model_out, dict) else model_out
                 loss = loss_iter
                 loss.backward()

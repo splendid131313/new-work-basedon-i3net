@@ -35,12 +35,12 @@ def select_model(args):
     model = module.make_model(args)
 
     flow_state = load_flowseek_ckpt(args)
-    missing_keys, unexpected_keys = model.flowseek.load_state_dict(
+    missing_keys, unexpected_keys = model.flow_estimator.flowseek.load_state_dict(
         flow_state, strict=True
     )
     if len(missing_keys) > 0:
         print(f"Warning: Missing keys: {missing_keys}")
-    for param in model.flowseek.parameters():
+    for param in model.flow_estimator.flowseek.parameters():
         param.requires_grad = False
     print("load flowseek weight success")
     return model
