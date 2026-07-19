@@ -15,115 +15,74 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 
 import wandb
-
-from torch.utils.data.distributed import DistributedSampler
-
 from data import trainSet
+import util
 
-# from data_prostate import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import Select_Loss
+import select_loss
 
 
 def main():
-    dist.init_process_group(backend="nccl")
-
-    local_rank = args.local_rank
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    is_main = rank == 0
-
     GLOBAL_SEED = 777
-    random.seed(GLOBAL_SEED + rank)
-    np.random.seed(GLOBAL_SEED + rank)
-    torch.manual_seed(GLOBAL_SEED + rank)
-    torch.cuda.manual_seed(GLOBAL_SEED + rank)
-    torch.cuda.manual_seed_all(GLOBAL_SEED + rank)
+    random.seed(GLOBAL_SEED)
 
     wandb_name = args.ckpt_dir
 
     args.ckpt_dir = "experiments/" + args.ckpt_dir
-    if is_main:
-        os.makedirs(args.ckpt_dir, exist_ok=True)
+    os.makedirs(args.ckpt_dir, exist_ok=True)
 
     trainset = trainSet(data_root=args.traindata_path, args=args)
-    train_sampler = DistributedSampler(
-        trainset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,
-    )
 
     dataloader = torch.utils.data.DataLoader(
         trainset,
         batch_size=args.batch_size,
-        sampler=train_sampler,
         num_workers=args.num_workers,
+        shuffle=True,
         pin_memory=False,
-        drop_last=False,
     )
 
     model = select_model(args)
-
-    if args.resume:
-        if is_main:
-            print("load weight")
-        load_ckpt = torch.load(args.ckpt, map_location="cpu")
-        state = load_ckpt["state_dict"]
-        if any(k.startswith("module.") for k in state.keys()):
-            state = {k.replace("module.", ""): v for k, v in state.items()}
-        model.load_state_dict(state)
-        if is_main:
-            print("load weight success")
-        args.start_epoch = load_ckpt["epoch"]
-
-    model = model.to(device)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    model = model.cuda()
+    model.weight_cycle = float(args.weight_cycle)
 
     optimizer = optim.select_optim(args, model)
     scheduler = optim.select_scheduler(args, optimizer)
-    loss_function = Select_Loss(args)
+    criterion_ncc = select_loss.NCC()
+    criterion_cha = select_loss.CharbonnierLoss
+    criterion_reg = select_loss.Grad3d(penalty="l2")
+    criterion_l1n = select_loss.L1_norm()
+    epsilon = 1e-3
 
-    if is_main:
-        wandb.init(
-            project="multi_random",
-            name=wandb_name,
-            config=args.__dict__,
-        )
-
-    # amp
-    use_amp = args.amp
-    if use_amp:
-        scaler = torch.cuda.amp.GradScaler()
-        autocast = torch.cuda.amp.autocast
-    else:
-        scaler = None
-        autocast = None
+    wandb.init(
+        project="multi_random",
+        name=wandb_name,
+        config=args.__dict__,
+    )
 
     best_psnr = 0
     last_80_start = int(0.7 * args.max_epoch)
 
     model.train()
     for epoch in range(args.start_epoch, args.max_epoch):
-        train_sampler.set_epoch(epoch)
+        loss_all = util.AverageMeter()
+        loss_all_full = util.AverageMeter()
+        loss_ncc_all_full = util.AverageMeter()
+        loss_cha_all_full = util.AverageMeter()
+        loss_reg_all_full = util.AverageMeter()
+        loss_all_cycle = util.AverageMeter()
+        loss_diff_all = util.AverageMeter()
 
         loss_epoch = 0
         psnr_epoch = 0
 
-        if is_main:
-            loader_iter = tqdm(enumerate(dataloader), total=len(dataloader))
-        else:
-            loader_iter = enumerate(dataloader)
+        loader_iter = tqdm(enumerate(dataloader), total=len(dataloader))
 
         for iter, (lr, gt, t) in loader_iter:
-            lr = lr.to(device, non_blocking=True)
-            gt = gt.to(device, non_blocking=True)
-            t = t.to(device, non_blocking=True)
+            lr = lr.cuda()
+            gt = gt.cuda()
+            t = t.cuda()
 
             if lr.ndim == 5:
                 B, N, H, W, C = lr.shape
@@ -133,54 +92,117 @@ def main():
 
             optimizer.zero_grad()
 
-            flow_fn = model.module.flow_estimator._get_base_flow
-            if use_amp:
-                with autocast():
-                    model_out = model(lr, t)
-                    loss_iter = loss_function(
-                        model_out, gt, cond=t, lr=lr, flow_fn=flow_fn
-                    )
-                    out = model_out["out"] if isinstance(model_out, dict) else model_out
-                    loss = loss_iter
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
+            i0 = lr.permute(0, 3, 1, 2)[:, 0:1].contiguous()
+            i1 = lr.permute(0, 3, 1, 2)[:, 1:2].contiguous()
+            gt_nchw = gt.permute(0, 3, 1, 2).contiguous()
+
+            if args.weight_cycle == 0:
+                # supervised: interpolate at t, supervise with middle-slice GT
                 model_out = model(lr, t)
-                loss_iter = loss_function(
-                    model_out, gt, cond=t, lr=lr, flow_fn=flow_fn
+                pred = model_out["out"]
+                i_0_1 = model_out["i_0_1"]
+                i_1_0 = model_out["i_1_0"]
+                flow_0_1 = model_out["flow_0_1"]
+                flow_1_0 = model_out["flow_1_0"]
+
+                loss_sup_ncc = criterion_ncc(pred, gt_nchw) * args.weight_ncc
+                loss_sup_cha = criterion_cha(pred, gt_nchw, eps=epsilon) * args.weight_cha
+                loss_ncc_1 = criterion_ncc(i_0_1, i1) * args.weight_ncc
+                loss_cha_1 = criterion_cha(i_0_1, i1, eps=epsilon) * args.weight_cha
+                loss_reg_1 = criterion_reg(flow_0_1, None)
+                loss_ncc_0 = criterion_ncc(i_1_0, i0) * args.weight_ncc
+                loss_cha_0 = criterion_cha(i_1_0, i0, eps=epsilon) * args.weight_cha
+                loss_reg_0 = criterion_reg(flow_1_0, None)
+                loss_full = (
+                    loss_sup_ncc
+                    + loss_sup_cha
+                    + loss_ncc_1
+                    + loss_cha_1
+                    + loss_reg_1
+                    + loss_ncc_0
+                    + loss_cha_0
+                    + loss_reg_0
                 )
-                out = model_out["out"] if isinstance(model_out, dict) else model_out
-                loss = loss_iter
-                loss.backward()
+
+                loss_all_full.update(loss_full.item(), gt_nchw.numel())
+                loss_ncc_all_full.update(loss_sup_ncc.item(), gt_nchw.numel())
+                loss_cha_all_full.update(loss_sup_cha.item(), gt_nchw.numel())
+                loss_reg_all_full.update(
+                    (loss_reg_0 + loss_reg_1).item(), gt_nchw.numel()
+                )
+
+                with torch.no_grad():
+                    psnr_iter = calc_psnr(pred, gt_nchw).item()
+                psnr_epoch += psnr_iter
+
+                loss_full.backward()
                 optimizer.step()
+                loss_all.update(loss_full.item(), gt_nchw.numel())
+                continue
+
+            # unsupervised cycle path
+            model_out = model(lr)
+            i_0_1, i_1_0, flow_0_1, flow_1_0, i0_out, i1_out, i0_out_diff, i1_out_diff = (
+                model_out
+            )
+
+            loss_ncc_1 = criterion_ncc(i_0_1, i1) * args.weight_ncc
+            loss_cha_1 = criterion_cha(i_0_1, i1, eps=epsilon) * args.weight_cha
+            loss_reg_1 = criterion_reg(flow_0_1, None)
+            loss_ncc_0 = criterion_ncc(i_1_0, i0) * args.weight_ncc
+            loss_cha_0 = criterion_cha(i_1_0, i0, eps=epsilon) * args.weight_cha
+            loss_reg_0 = criterion_reg(flow_1_0, None)
+            loss_full = (
+                loss_ncc_1
+                + loss_cha_1
+                + loss_reg_1
+                + loss_ncc_0
+                + loss_cha_0
+                + loss_reg_0
+            )
+
+            loss_all_full.update(loss_full.item(), i1.numel())
+            loss_ncc_all_full.update(loss_ncc_1.item(), i1.numel())
+            loss_cha_all_full.update(loss_cha_1.item(), i1.numel())
+            loss_reg_all_full.update(loss_reg_1.item(), i1.numel())
+            loss_ncc_all_full.update(loss_ncc_0.item(), i1.numel())
+            loss_cha_all_full.update(loss_cha_0.item(), i1.numel())
+            loss_reg_all_full.update(loss_reg_0.item(), i1.numel())
 
             with torch.no_grad():
-                psnr_iter = calc_psnr(gt, out).item()
-
-            loss_epoch += loss_iter.detach().item()
+                psnr_iter = 0.5 * (
+                    calc_psnr(i_0_1, i1).item() + calc_psnr(i_1_0, i0).item()
+                )
             psnr_epoch += psnr_iter
 
-            if is_main:
-                lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
-                log = (
-                    f"epoch[{epoch + 1}/{args.max_epoch}] "
-                    f"iter[{iter + 1}/{len(dataloader)}] "
-                    f"psnr:{psnr_iter:.6f} loss:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
-                )
-                now = str(datetime.datetime.now())
-                print(now + " " + log)
+            loss_diff_0 = criterion_l1n(i0_out_diff)
+            loss_diff_1 = criterion_l1n(i1_out_diff)
+            loss_diff = (loss_diff_0 + loss_diff_1) * args.weight_diff
 
-        loss_tensor = torch.tensor(loss_epoch, device=device)
-        psnr_tensor = torch.tensor(psnr_epoch, device=device)
-        count_tensor = torch.tensor(len(dataloader), device=device, dtype=torch.float32)
+            loss_cyc_ncc_0 = criterion_ncc(i0_out, i0) * args.weight_ncc
+            loss_cyc_cha_0 = criterion_cha(i0_out, i0, eps=epsilon) * args.weight_cha
+            loss_cyc_ncc_1 = criterion_ncc(i1_out, i1) * args.weight_ncc
+            loss_cyc_cha_1 = criterion_cha(i1_out, i1, eps=epsilon) * args.weight_cha
 
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(psnr_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+            loss_cycle_0 = loss_cyc_ncc_0 + loss_cyc_cha_0
+            loss_cycle_1 = loss_cyc_ncc_1 + loss_cyc_cha_1
+            loss_cycle = (loss_cycle_0 + loss_cycle_1) * args.weight_cycle
 
-        loss_epoch = (loss_tensor / count_tensor).item()
-        psnr_epoch = (psnr_tensor / count_tensor).item()
+            loss_diff_all.update(loss_diff_0.item(), i1.numel())
+            loss_diff_all.update(loss_diff_1.item(), i1.numel())
+            loss_all_cycle.update(loss_cycle_0.item(), i1.numel())
+            loss_all_cycle.update(loss_cycle_1.item(), i1.numel())
+
+            loss = loss_full + loss_cycle + loss_diff
+
+            loss.backward()
+            optimizer.step()
+
+            loss_all.update(loss.item(), i0.numel())
+
+        n_iter = max(len(dataloader), 1)
+        psnr_epoch = psnr_epoch / n_iter
+        loss_epoch = loss_all.avg
 
         if args.schedule == "step":
             scheduler.step()
@@ -191,46 +213,41 @@ def main():
         elif args.schedule == "Tmax":
             scheduler.step(loss_epoch)
 
-        if is_main:
-            lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
+        lr_tmp = optimizer.state_dict()["param_groups"][0]["lr"]
 
-            with torch.no_grad():
-                out = torch.clamp(out, 0, 1)
-                gt = torch.clamp(gt, 0, 1)
+        wandb.log({"Loss_all/train": loss_all.avg})
+        wandb.log({"Loss_full/train_all": loss_all_full.avg})
+        wandb.log({"Loss_full/train_img_ncc": loss_ncc_all_full.avg})
+        wandb.log({"Loss_full/train_img_cha": loss_cha_all_full.avg})
+        wandb.log({"Loss_full/train_reg": loss_reg_all_full.avg})
+        wandb.log({"Loss_cycle/train_all": loss_all_cycle.avg})
+        wandb.log({"Loss_cycle/train_diff": loss_diff_all.avg})
+        wandb.log({"Metrics/PSNR": psnr_epoch})
 
-                wandb.log(
-                    {
-                        "train/psnr_epoch": psnr_epoch,
-                        "train/loss_epoch": loss_epoch,
-                        "train/lr": lr_tmp,
-                        "epoch": epoch,
-                        "vis/out": wandb.Image(out, caption="Pred"),
-                        "vis/gt": wandb.Image(gt, caption="GT"),
-                    }
-                )
+        log = (
+            f"epoch[{epoch + 1}/{args.max_epoch}] "
+            f"psnr:{psnr_epoch:.6f} loss:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+        )
+        now = str(datetime.datetime.now())
+        print(now + " " + log)
 
-            log = (
-                f"epoch[{epoch + 1}/{args.max_epoch}] "
-                f"psnr:{psnr_epoch:.6f} loss:{loss_epoch:.12f} lr:{lr_tmp:.12f}"
+        os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
+
+        if epoch + 1 > last_80_start and psnr_epoch > best_psnr:
+            best_psnr = psnr_epoch
+            state_dict = (
+                model.module.state_dict()
+                if isinstance(model, DDP)
+                else model.state_dict()
             )
-            now = str(datetime.datetime.now())
-            print(now + " " + log)
+            torch.save(
+                state_dict,
+                args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
+            )
+            print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
 
-            os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
+    wandb.finish()
 
-            if epoch + 1 > last_80_start and psnr_epoch > best_psnr:
-                best_psnr = psnr_epoch
-                state_dict = model.module.state_dict()
-                torch.save(
-                    state_dict,
-                    args.ckpt_dir + "/pth/best_{:04d}.pth".format(epoch + 1),
-                )
-                print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
-
-    if is_main:
-        wandb.finish()
-
-    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

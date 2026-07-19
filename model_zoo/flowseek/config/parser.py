@@ -18,7 +18,7 @@ def parse_args(parser):
     args_dict = args.__dict__
     for index, (key, value) in enumerate(vars(entry).items()):
         args_dict[key] = value
-    args2 = json_to_args('./flowseek/config/datapaths.json')
+    args2 = json_to_args('./model_zoo/flowseek/config/datapaths.json')
     args_dict = args.__dict__
     for index, (key, value) in enumerate(vars(args2).items()):
         args_dict[key] = value

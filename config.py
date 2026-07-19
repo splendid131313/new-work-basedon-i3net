@@ -19,17 +19,19 @@ data_arg.add_argument('--data_type', type=str, default='direct')
 data_arg.add_argument('--max_mid_slices', type=int, default=7, help='动态跨度采样时中间切片数上界n；None则用体积深度-2')
 data_arg.add_argument('--targets_per_span', type=int, default=2, help='number of supervised middle slices sampled from each endpoint span')
 data_arg.add_argument('--large_gap_prob', type=float, default=0.5, help='probability of sampling from the larger half of available z gaps')
-data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task03_Lung/train')
+data_arg.add_argument('--traindata_path', type=str, default=r'H:\Medical\dataset\Task06_Lung\volumes\train')
 data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
 data_arg.add_argument('--image_size', type=int, default=256)
 
 
 # Model
 model_arg = add_argument_group('Model')
-model_arg.add_argument('--model', type=str, default='i3net', help='select model')
+model_arg.add_argument('--model', type=str, default='uvinet', help='select model: i3net | uvinet')
+model_arg.add_argument('--feature_extract', type=bool, default=True)
 # model_arg.add_argument('--upscale', type=int, default=2, help='scale_factor')
 model_arg.add_argument("--resume", type=bool, default=False, help='run resume or not')
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
+# flow_* only used when --model i3net
 model_arg.add_argument("--flow_cfg", type=str, default="flowseek-S.json")
 model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/weights/flowseek_T_CT.pth")
 
@@ -44,27 +46,26 @@ learn_arg.add_argument('--beta1', type=float, default=0.9, help='Adam-beta1')
 learn_arg.add_argument('--beta2', type=float, default=0.999, help='Adam-beta2')
 learn_arg.add_argument('--eps', type=float, default=1e-08)
 learn_arg.add_argument('--flood', type=bool, default=False)
-learn_arg.add_argument('--ssim_loss_weight', type=float, default=0.0)
-learn_arg.add_argument('--charbonnier_eps', type=float, default=1e-3)
-learn_arg.add_argument('--near_anchor_loss_weight', type=float, default=0.05)
-learn_arg.add_argument('--near_anchor_threshold', type=float, default=0.35)
-learn_arg.add_argument('--mask_prior_loss_weight', type=float, default=0.01, help='light prior: mean(mask) ~ 1-t')
+#### loss ####
+learn_arg.add_argument('--weight_cycle', type=float, default=0.0)
+learn_arg.add_argument('--weight_diff', type=float, default=0.0)
+learn_arg.add_argument('--weight_ncc', type=float, default=1.0)
+learn_arg.add_argument('--weight_cha', type=float, default=1.0)
 #### schedule ####
 learn_arg.add_argument('--schedule', type=str, default='cos_lr', help='step/cos_lr/Tmax/Tmin') 
 learn_arg.add_argument('--lr_decay', type=int, default=400)
 learn_arg.add_argument('--gamma', type=float, default='0.5', help='下降速度')
 #### epoch/bs ####
-learn_arg.add_argument('--batch_size', type=int, default=6)
+learn_arg.add_argument('--batch_size', type=int, default=1)
 learn_arg.add_argument('--one_batch_n_sample', type=int, default=1, help='smapling n times of each volume')
 learn_arg.add_argument('--start_epoch', type=int, default=0)
 learn_arg.add_argument('--max_epoch', type=int, default=800)
 learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up epoch ratio')
 
-
 # Misc
 misc_arg = add_argument_group('Misc')
-misc_arg.add_argument('--ckpt_dir', type=str, default='lung',help='saved filename')
-misc_arg.add_argument('--gpu_id', type=str, default='0,1')
+misc_arg.add_argument('--ckpt_dir', type=str, default='uvinet',help='saved filename')
+misc_arg.add_argument('--gpu_id', type=str, default='0')
 misc_arg.add_argument('--num_workers', type=int, default=8)
 misc_arg.add_argument('--parallel', type=bool, default=True, help="parallel training")
 misc_arg.add_argument("--local_rank", default=os.getenv('LOCAL_RANK', 0), type=int)

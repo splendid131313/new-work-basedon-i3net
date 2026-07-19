@@ -1,127 +1,113 @@
 import torch
-from torch import nn
+import torch.nn.functional as F
+import math
+import numpy as np
 
-from model_zoo.flow_module import warp
+class NCC(torch.nn.Module):
+    """
+    Local (over window) normalized cross correlation loss.
+    """
 
+    def __init__(self, win=9, gpu=True):
+        super(NCC, self).__init__()
+        self.win = win
+        if gpu:
+            self.device = "cuda:0"
+        else:
+            self.device = "cpu"
 
-class Select_Loss(nn.Module):
-    def __init__(self, args):
-        super(Select_Loss, self).__init__()
-        self.args = args
-        self.l1loss = nn.L1Loss()
-        self.ssim = SSIM()
-        self.ssim_weight = float(getattr(args, "ssim_loss_weight", 0.0))
-        self.charbonnier_eps = float(getattr(args, "charbonnier_eps", 1e-3))
-        self.near_anchor_weight = float(getattr(args, "near_anchor_loss_weight", 0.0))
-        self.near_anchor_threshold = float(getattr(args, "near_anchor_threshold", 0.35))
-        self.mask_prior_weight = float(getattr(args, "mask_prior_loss_weight", 0.0))
+    def forward(self, y_true, y_pred):
+        Ii = y_true
+        Ji = y_pred
 
-    def _charbonnier(self, pred, target):
-        return torch.sqrt((pred - target) ** 2 + self.charbonnier_eps ** 2).mean()
-
-    def _mask_prior_loss(self, mask, cond):
-        t = cond[:, :1]
-        mask_mean = mask.mean(dim=(2, 3))
-        target_mask = 1.0 - t
-        return torch.abs(mask_mean - target_mask).mean()
-
-    def _near_anchor_loss(self, pred, img0, img1, gt, cond, flow_fn):
-        t = cond[:, 0]
-        left_mask = t <= self.near_anchor_threshold
-        right_mask = t >= (1.0 - self.near_anchor_threshold)
-
-        near_pred, near_target = [], []
-
-        if left_mask.any():
-            pred_l = pred[left_mask]
-            gt_l = gt[left_mask]
-            img0_l = img0[left_mask]
-            flow_t0, _ = flow_fn(gt_l, img0_l)
-            near_pred.append(warp(pred_l, -flow_t0))
-            near_target.append(img0_l)
-
-        if right_mask.any():
-            pred_r = pred[right_mask]
-            gt_r = gt[right_mask]
-            img1_r = img1[right_mask]
-            flow_t1, _ = flow_fn(gt_r, img1_r)
-            near_pred.append(warp(pred_r, -flow_t1))
-            near_target.append(img1_r)
-
-        if not near_pred:
-            return None
-
-        return self._charbonnier(
-            torch.cat(near_pred, dim=0),
-            torch.cat(near_target, dim=0),
+        # get dimension of volume
+        # assumes Ii, Ji are sized [batch_size, *vol_shape, nb_feats]
+        ndims = len(list(Ii.size())) - 2
+        assert ndims in [1, 2, 3], (
+            "volumes should be 1 to 3 dimensions. found: %d" % ndims
         )
 
-    def forward(self, sr, gt, cond=None, lr=None, flow_fn=None):
-        mask = None
-        if isinstance(sr, dict):
-            mask = sr.get("mask")
-            sr = sr["out"]
+        # set window size
+        win = [self.win] * ndims
 
-        loss = self._charbonnier(sr, gt)
-        if self.ssim_weight > 0 and sr.ndim == 4:
-            sr_nchw = sr.permute(0, 3, 1, 2).contiguous()
-            gt_nchw = gt.permute(0, 3, 1, 2).contiguous()
-            loss = loss + self.ssim_weight * self.ssim(sr_nchw, gt_nchw).mean()
+        # compute filters
+        sum_filt = torch.ones([1, 1, *win]).to(self.device)
 
-        if self.mask_prior_weight > 0 and mask is not None and cond is not None:
-            loss = loss + self.mask_prior_weight * self._mask_prior_loss(mask, cond)
+        pad_no = math.floor(win[0] / 2)
 
-        if (
-            self.near_anchor_weight > 0
-            and flow_fn is not None
-            and lr is not None
-            and cond is not None
-        ):
-            pred = sr.permute(0, 3, 1, 2).contiguous()
-            gt_nchw = gt.permute(0, 3, 1, 2).contiguous()
-            lr_nchw = lr.permute(0, 3, 1, 2).contiguous()
-            near_loss = self._near_anchor_loss(
-                pred,
-                lr_nchw[:, 0:1],
-                lr_nchw[:, 1:2],
-                gt_nchw,
-                cond,
-                flow_fn,
-            )
-            if near_loss is not None:
-                loss = loss + self.near_anchor_weight * near_loss
+        if ndims == 1:
+            stride = 1
+            padding = pad_no
+        elif ndims == 2:
+            stride = (1, 1)
+            padding = (pad_no, pad_no)
+        else:
+            stride = (1, 1, 1)
+            padding = (pad_no, pad_no, pad_no)
 
-        return loss
+        # get convolution function
+        conv_fn = getattr(F, "conv%dd" % ndims)
+
+        # compute CC squares
+        I2 = Ii * Ii
+        J2 = Ji * Ji
+        IJ = Ii * Ji
+
+        I_sum = conv_fn(Ii, sum_filt, stride=stride, padding=padding)
+        J_sum = conv_fn(Ji, sum_filt, stride=stride, padding=padding)
+        I2_sum = conv_fn(I2, sum_filt, stride=stride, padding=padding)
+        J2_sum = conv_fn(J2, sum_filt, stride=stride, padding=padding)
+        IJ_sum = conv_fn(IJ, sum_filt, stride=stride, padding=padding)
+
+        win_size = np.prod(win)
+        u_I = I_sum / win_size
+        u_J = J_sum / win_size
+
+        cross = IJ_sum - u_J * I_sum - u_I * J_sum + u_I * u_J * win_size
+        I_var = I2_sum - 2 * u_I * I_sum + u_I * u_I * win_size
+        J_var = J2_sum - 2 * u_J * J_sum + u_J * u_J * win_size
+
+        cc = cross * cross / (I_var * J_var + 1e-5)
+
+        return -torch.mean(cc)
 
 
-class SSIM(nn.Module):
-    """Layer to compute the SSIM loss between a pair of images"""
+def CharbonnierLoss(predict, target, eps=1e-3):
+    return torch.mean(torch.sqrt((predict - target) ** 2 + eps**2))
 
+class Grad3d(torch.nn.Module):
+    """
+    N-D gradient loss (works for 2D or 3D flow).
+    """
+
+    def __init__(self, penalty="l1", loss_mult=None):
+        super(Grad3d, self).__init__()
+        self.penalty = penalty
+        self.loss_mult = loss_mult
+
+    def forward(self, y_pred, y_true):
+        # y_pred: (B, C, H, W) or (B, C, D, H, W)
+        ndims = y_pred.ndim - 2
+        grads = []
+        if ndims >= 1:
+            # last spatial axis
+            dx = torch.abs(y_pred[..., 1:] - y_pred[..., :-1])
+            grads.append(dx * dx if self.penalty == "l2" else dx)
+        if ndims >= 2:
+            dy = torch.abs(y_pred[..., 1:, :] - y_pred[..., :-1, :])
+            grads.append(dy * dy if self.penalty == "l2" else dy)
+        if ndims >= 3:
+            dz = torch.abs(y_pred[..., 1:, :, :] - y_pred[..., :-1, :, :])
+            grads.append(dz * dz if self.penalty == "l2" else dz)
+
+        grad = sum(torch.mean(g) for g in grads) / float(len(grads))
+        if self.loss_mult is not None:
+            grad *= self.loss_mult
+        return grad
+
+class L1_norm(torch.nn.Module):
     def __init__(self):
-        super(SSIM, self).__init__()
-        self.mu_x_pool = nn.AvgPool2d(3, 1)
-        self.mu_y_pool = nn.AvgPool2d(3, 1)
-        self.sig_x_pool = nn.AvgPool2d(3, 1)
-        self.sig_y_pool = nn.AvgPool2d(3, 1)
-        self.sig_xy_pool = nn.AvgPool2d(3, 1)
+        super(L1_norm, self).__init__()
 
-        self.refl = nn.ReflectionPad2d(1)
-
-        self.C1 = 0.01 ** 2
-        self.C2 = 0.03 ** 2
-
-    def forward(self, x, y):
-        x = self.refl(x)
-        y = self.refl(y)
-
-        mu_x = self.mu_x_pool(x)
-        mu_y = self.mu_y_pool(y)
-
-        sigma_x = self.sig_x_pool(x ** 2) - mu_x ** 2
-        sigma_y = self.sig_y_pool(y ** 2) - mu_y ** 2
-        sigma_xy = self.sig_xy_pool(x * y) - mu_x * mu_y
-
-        SSIM_n = (2 * mu_x * mu_y + self.C1) * (2 * sigma_xy + self.C2)
-        SSIM_d = (mu_x ** 2 + mu_y ** 2 + self.C1) * (sigma_x + sigma_y + self.C2)
-
-        return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)
+    def forward(self, img1):
+        return torch.mean(torch.abs(img1))
