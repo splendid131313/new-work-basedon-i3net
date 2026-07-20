@@ -120,7 +120,7 @@ def main():
         else:
             loader_iter = enumerate(dataloader)
 
-        for iter, (lr, gt, t) in loader_iter:
+        for iter, (lr, gt, t, meta) in loader_iter:
             lr = lr.to(device, non_blocking=True)
             gt = gt.to(device, non_blocking=True)
             t = t.to(device, non_blocking=True)
@@ -130,6 +130,7 @@ def main():
                 lr = lr.view(B * N, H, W, C)
                 gt = gt.view(B * N, H, W, gt.shape[-1])
                 t = t.view(B * N, t.shape[-1])
+                meta = meta.view(B * N, meta.shape[-1])
 
             optimizer.zero_grad()
 

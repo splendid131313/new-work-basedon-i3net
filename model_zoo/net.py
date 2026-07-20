@@ -62,7 +62,7 @@ class Net(nn.Module):
     def forward_single_t(self, img0, img1, cond):
         # img0, img1: (B, 1, H, W)
         # cond: (B, 2)
-        warped0, warped1 = self.flow_estimator(img0, img1, cond)
+        warped0, warped1, flow0t, flow1t = self.flow_estimator(img0, img1, cond)
 
         x_in = torch.cat([img0, img1, warped0, warped1], dim=1)
         feat = self.head(x_in)
@@ -81,13 +81,24 @@ class Net(nn.Module):
         delta = raw_output[:, 1:, :, :]
 
         out = mask * warped0 + (1 - mask) * warped1 + delta
-        return out, mask
+        return out, mask, warped0, warped1, flow0t, flow1t
 
     def forward(self, x, cond):
         x = x.permute(0, 3, 1, 2).contiguous()
-        out, mask = self.forward_single_t(x[:, 0:1], x[:, 1:2], cond)
+        out, mask, warped0, warped1, flow0t, flow1t = self.forward_single_t(
+            x[:, 0:1], x[:, 1:2], cond
+        )
         out = out.permute(0, 2, 3, 1).contiguous()
-        return {"out": out, "mask": mask}
+        return {
+            "out": out,
+            "mask": mask,
+            "warped0": warped0,
+            "warped1": warped1,
+            "flow0t": flow0t,
+            "flow1t": flow1t,
+            "img0": x[:, 0:1],
+            "img1": x[:, 1:2],
+        }
 
     def inference(self, x, cond):
         x = x.permute(0, 3, 1, 2).contiguous()
@@ -105,7 +116,7 @@ class Net(nn.Module):
                 t_tensor = torch.tensor(
                     [t_val, gap_norm], device=x.device, dtype=x.dtype
                 ).view(1, self.cond_dim).expand(B, -1)
-                out_t, _ = self.forward_single_t(img0, img1, t_tensor)
+                out_t, *_ = self.forward_single_t(img0, img1, t_tensor)
                 out_volume.append(out_t)
         out_volume.append(x[:, -1:])
         return torch.cat(out_volume, dim=1)

@@ -81,7 +81,7 @@ class trainSet(Dataset):
         gap_norm = min(float(gap) / float(max_gap), 1.0)
 
         lr_base = hr_span[:, :, [0, -1]]
-        lr_list, gt_list, cond_list = [], [], []
+        lr_list, gt_list, cond_list, meta_list = [], [], [], []
         for mid_idx in mid_indices:
             lr_list.append(torch.from_numpy(lr_base.copy()))
             gt_list.append(
@@ -90,27 +90,34 @@ class trainSet(Dataset):
             cond_list.append(
                 torch.tensor([mid_idx / gap, gap_norm], dtype=torch.float32)
             )
+            # [n_mid, mid_idx]：中间切片总数、监督目标是第几张（相对 span，1..n_mid）
+            meta_list.append(
+                torch.tensor([n_mid, mid_idx], dtype=torch.float32)
+            )
 
         return (
             torch.stack(lr_list, 0),
             torch.stack(gt_list, 0),
             torch.stack(cond_list, 0),
+            torch.stack(meta_list, 0),
         )
 
     def __getitem__(self, index):
         volume = self._load_volume(self.volume_list[index])
 
-        lr_list, gt_list, t_list = [], [], []
+        lr_list, gt_list, t_list, meta_list = [], [], [], []
         for _ in range(self.args.one_batch_n_sample):
-            lr, gt, t = self._sample_dynamic_span(volume)
+            lr, gt, t, meta = self._sample_dynamic_span(volume)
             lr_list.append(lr)
             gt_list.append(gt)
             t_list.append(t)
+            meta_list.append(meta)
 
         lr = torch.cat(lr_list, 0)
         gt = torch.cat(gt_list, 0)
         t = torch.cat(t_list, 0)
-        return lr, gt, t
+        meta = torch.cat(meta_list, 0)
+        return lr, gt, t, meta
 
     def __len__(self):
         return self.file_len
