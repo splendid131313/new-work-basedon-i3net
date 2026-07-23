@@ -63,11 +63,20 @@ def main():
         vmax = float(vmax.squeeze(0).item()) if hasattr(vmax, "squeeze") else float(vmax)
         
         upscale = args.max_mid_slices + 1
-        surplus = (gt.shape[2]-1) % upscale -1
-        surplus_with_interpolation = False if surplus == 1 else True
-         
-        lr_mid = gt[...,:-surplus:upscale]
-        lr_surplus = gt[...,-surplus::surplus]
+        # surplus: 尾部相对固定步长 upscale 的余量
+        # 0: 整除，只需 mid；1: 末尾多 1 张，直接拼接；>=2: 尾部再插值
+        surplus = (gt.shape[2] - 1) % upscale
+
+        if surplus == 0:
+            lr_mid = gt[..., ::upscale]
+            lr_surplus = None
+        elif surplus == 1:
+            lr_mid = gt[..., :-1:upscale]
+            lr_surplus = gt[..., -1:]  # [H,W,1]，无需插值
+        else:
+            lr_mid = gt[..., :-surplus:upscale]
+            # 尾部两端点，步长 = surplus
+            lr_surplus = gt[..., -(surplus + 1)::surplus]
 
         # prepare save dirs for sr and I_t
         save_root = os.path.join(args.ckpt_dir, 'results')
@@ -78,34 +87,35 @@ def main():
             name_str = str(name)
         name_str = os.path.splitext(os.path.basename(name_str))[0]
 
-        sr = torch.zeros_like(gt)
-
-        psnr_slice = []
-        ssim_slice = []
-
-        t_list_mid = [k/upscale for k in range(1, upscale)]
-        t_list_surplus = [k/surplus for k in range(1, surplus)]
-
-        lr_mid = lr_mid.unsqueeze(0).cuda() #[1,s,h,w]
-        lr_surplus = lr_surplus.unsqueeze(0).cuda() #[1,s,h,w]
+        t_list_mid = [k / upscale for k in range(1, upscale)]
+        # inference 输入 [B,H,W,T]，输出 [B,T,H,W]
+        lr_mid = lr_mid.unsqueeze(0).cuda()
         with torch.no_grad():
-            sr_mid = model.inference(lr_mid, t_list_mid) #[1,s,h,w]
-            if surplus_with_interpolation:
-                sr_surplus = model.inference(lr_surplus, t_list_surplus) #[1,s,h,w]
+            sr_mid = model.inference(lr_mid, t_list_mid)
+            if surplus == 0:
+                sr = sr_mid
+            elif surplus == 1:
+                # 直接拼最后一张，注意与 sr_mid 布局对齐为 [B,T,H,W]
+                sr_tail = lr_surplus.permute(2, 0, 1).unsqueeze(0).cuda()
+                sr = torch.cat([sr_mid, sr_tail], dim=1)
             else:
-                sr_surplus = lr_surplus
-        
-        sr = torch.cat([sr_mid, sr_surplus[...,1:]], dim=1)
-        sr_cpu = torch.clamp(sr.squeeze(0), 0, 1).detach().cpu()
-        gt_cpu = gt.detach().cpu()
+                t_list_surplus = [k / surplus for k in range(1, surplus)]
+                lr_surplus = lr_surplus.unsqueeze(0).cuda()
+                sr_surplus = model.inference(lr_surplus, t_list_surplus)
+                # 首帧与 sr_mid 末帧重叠，丢掉
+                sr = torch.cat([sr_mid, sr_surplus[:, 1:]], dim=1)
+
+        # [B,T,H,W] -> [H,W,S]，与 gt 对齐
+        sr = torch.clamp(sr.squeeze(0).permute(1, 2, 0), 0, 1)
+        sr_cpu = sr.detach().cpu()
 
         sr_raw = util.denormalize(sr_cpu, vmin, vmax).numpy().astype(np.float32)
         save_path = os.path.join(save_root, f"{name_str}.npy")
         np.save(save_path, sr_raw)
 
-        # print(sr.shape) # h w s
         gt = gt.cuda()
         sr = sr.cuda()
+        psnr = calc_psnr(gt, sr).item()
         for i in range(gt.shape[2]):
             ssim = calc_ssim(gt[:, :, i], sr[:, :, i])
             x_y_ssim += ssim
@@ -119,13 +129,14 @@ def main():
             y_z_ssim += ssim
         y_z_ssim /= i + 1
 
-        log = r"[{} / {}] NAME:{} PSNR:{} x_y_ssim:{:.4f} x_z_ssim:{:.4f} y_z_ssim:{:.4f}".format(
-            id + 1, dataloader.__len__(), name, average_psnr, x_y_ssim, x_z_ssim, y_z_ssim
+        log = r"[{} / {}] NAME:{} PSNR:{:.4f} x_y_ssim:{:.4f} x_z_ssim:{:.4f} y_z_ssim:{:.4f}".format(
+            id + 1, dataloader.__len__(), name, psnr, x_y_ssim, x_z_ssim, y_z_ssim
         )
         print(log)
         with open(args.ckpt_dir + '/logs_test.txt',mode='a+') as f:
-            f.write(log+'\n') 
-        
+            f.write(log+'\n')
+
+        average_psnr += psnr
         total_x_y_ssim += x_y_ssim
         total_x_z_ssim += x_z_ssim
         total_y_z_ssim += y_z_ssim

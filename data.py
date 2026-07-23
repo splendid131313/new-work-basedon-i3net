@@ -119,8 +119,6 @@ class trainSet(Dataset):
         meta = torch.cat(meta_list, 0)
         return lr, gt, t, meta
 
-    def __len__(self):
-        return self.file_len
 
 
 class testSet(Dataset):
