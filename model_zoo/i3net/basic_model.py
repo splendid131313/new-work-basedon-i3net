@@ -254,6 +254,10 @@ class I3Net(nn.Module):
         self.head = nn.Sequential(conv(in_slice,n_feats,kernel_size),
                                   nn.ReLU(),
                                   conv(n_feats,n_feats,kernel_size))
+
+        # self.head_traj = nn.Sequential(conv(1, n_feats, kernel_size),
+        #                           nn.ReLU(),
+        #                           conv(n_feats, n_feats, kernel_size))
         
         modules_body = [
             I2Group(
