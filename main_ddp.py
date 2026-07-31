@@ -59,10 +59,10 @@ def sample_caption(t, meta, sample_idx=0):
     n_mid = int(meta[sample_idx, 0].item())
     mid_idx = int(meta[sample_idx, 1].item())
     t_val = float(t0[0].item())
-    gap_norm = float(t0[1].item())
+    gap = float(t0[1].item())
     return (
         f"n_mid={n_mid}, mid_idx={mid_idx}/{n_mid}, "
-        f"t={t_val:.4f}, gap_norm={gap_norm:.4f}"
+        f"t={t_val:.4f}, gap={gap:g}"
     )
 
 

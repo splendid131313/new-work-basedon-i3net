@@ -52,33 +52,32 @@ class trainSet(Dataset):
 
     def _sample_dynamic_span(self, volume):
         z_size = volume.shape[2]
-        n_upper = min(z_size - 2, getattr(self.args, "max_mid_slices", z_size - 2))
-        if n_upper < 1:
+        targets_per_span = max(1, int(getattr(self.args, "targets_per_span", 1)))
+        train_gaps = [int(gap) for gap in getattr(self.args, "train_gaps", [2, 3, 4])]
+        valid_gaps = [
+            gap for gap in train_gaps
+            if gap >= 2 and gap < z_size and (gap - 1) >= targets_per_span
+        ]
+        if not valid_gaps:
             raise ValueError(
-                f"volume z={z_size} too short for dynamic span (need >= 3 slices)"
+                f"volume z={z_size} has no valid train gap in {train_gaps} "
+                f"for targets_per_span={targets_per_span}"
             )
 
-        targets_per_span = max(1, int(getattr(self.args, "targets_per_span", 1)))
-        large_gap_prob = float(getattr(self.args, "large_gap_prob", 0.0))
-        if n_upper > 1 and random.random() < large_gap_prob:
-            n_mid = random.randint(max(targets_per_span, (n_upper + 1) // 2), n_upper)
-        else:
-            n_mid = random.randint(targets_per_span, n_upper)
-        span_len = n_mid + 2
+        # Sample endpoint distance directly. This keeps the meaning and frequency
+        # of each scale independent of max_mid_slices.
+        gap = random.choice(valid_gaps)
+        n_mid = gap - 1
+        span_len = gap + 1
         z0 = random.randint(0, z_size - span_len)
-        z1 = z0 + n_mid + 1
+        z1 = z0 + gap
 
-        hr_span = volume[:, :, z0 : z1 + 1].astype(np.float32)
-        hr_span = util.normalize(hr_span)
+        hr_span = volume[:, :, z0 : z1 + 1]
         hr_span = self._augment_xy(hr_span)
         hr_span = util.crop_center(hr_span, self.image_size, self.image_size)
 
         all_mid = list(range(1, n_mid + 1))
         mid_indices = random.sample(all_mid, targets_per_span)
-
-        gap = n_mid + 1
-        max_gap = max(1, int(getattr(self.args, "max_mid_slices", n_upper)) + 1)
-        gap_norm = min(float(gap) / float(max_gap), 1.0)
 
         lr_base = hr_span[:, :, [0, -1]]
         lr_list, gt_list, cond_list, meta_list = [], [], [], []
@@ -88,7 +87,7 @@ class trainSet(Dataset):
                 torch.from_numpy(hr_span[:, :, mid_idx : mid_idx + 1].copy())
             )
             cond_list.append(
-                torch.tensor([mid_idx / gap, gap_norm], dtype=torch.float32)
+                torch.tensor([mid_idx / gap, float(gap)], dtype=torch.float32)
             )
             # [n_mid, mid_idx]：中间切片总数、监督目标是第几张（相对 span，1..n_mid）
             meta_list.append(
@@ -104,6 +103,7 @@ class trainSet(Dataset):
 
     def __getitem__(self, index):
         volume = self._load_volume(self.volume_list[index])
+        volume = util.normalize(volume).astype(np.float32)
 
         lr_list, gt_list, t_list, meta_list = [], [], [], []
         for _ in range(self.args.one_batch_n_sample):
@@ -119,6 +119,8 @@ class trainSet(Dataset):
         meta = torch.cat(meta_list, 0)
         return lr, gt, t, meta
 
+    def __len__(self):
+        return self.file_len
 
 
 class testSet(Dataset):

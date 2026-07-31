@@ -12,6 +12,40 @@ from select_model import select_model
 import util
 
 
+@torch.no_grad()
+def infer_volume(model, volume, gap, lr_slice_patch=4):
+    """滑窗推理，重叠区域按计数取平均。"""
+    device = next(model.parameters()).device
+    volume = volume.to(device)
+
+    surplus = (volume.shape[2] - 1) % gap
+    if surplus != 0:
+        volume = volume[..., :-surplus]
+
+    lr = volume[..., ::gap]
+    if lr.shape[2] < lr_slice_patch:
+        raise ValueError(
+            f"lr depth {lr.shape[2]} < lr_slice_patch {lr_slice_patch}"
+        )
+
+    hr_slice_patch = (lr_slice_patch - 1) * gap + 1
+    sr = torch.zeros_like(volume)
+    sr_cnt = torch.zeros_like(volume)
+    t_list = [k / gap for k in range(1, gap)]
+
+    for i in range(lr.shape[2] - lr_slice_patch + 1):
+        tmp_lr = lr[..., i : i + lr_slice_patch].unsqueeze(0)
+        tmp_sr = model.inference(tmp_lr, t_list, gap=gap)
+        tmp_sr = torch.clamp(tmp_sr.squeeze(0).permute(1, 2, 0), 0, 1)
+
+        hr_start = i * gap
+        sr[..., hr_start : hr_start + hr_slice_patch] += tmp_sr
+        sr_cnt[..., hr_start : hr_start + hr_slice_patch] += 1
+
+    sr = sr / torch.clamp(sr_cnt, min=1)
+    return sr
+
+
 def main():
     args.ckpt_dir = 'experiments/'+args.ckpt_dir
     os.makedirs(args.ckpt_dir,exist_ok=True)
@@ -61,24 +95,7 @@ def main():
         # stats are per-volume; squeeze batch dim
         vmin = float(vmin.squeeze(0).item()) if hasattr(vmin, "squeeze") else float(vmin)
         vmax = float(vmax.squeeze(0).item()) if hasattr(vmax, "squeeze") else float(vmax)
-        
-        upscale = args.max_mid_slices + 1
-        # surplus: 尾部相对固定步长 upscale 的余量
-        # 0: 整除，只需 mid；1: 末尾多 1 张，直接拼接；>=2: 尾部再插值
-        surplus = (gt.shape[2] - 1) % upscale
 
-        if surplus == 0:
-            lr_mid = gt[..., ::upscale]
-            lr_surplus = None
-        elif surplus == 1:
-            lr_mid = gt[..., :-1:upscale]
-            lr_surplus = gt[..., -1:]  # [H,W,1]，无需插值
-        else:
-            lr_mid = gt[..., :-surplus:upscale]
-            # 尾部两端点，步长 = surplus
-            lr_surplus = gt[..., -(surplus + 1)::surplus]
-
-        # prepare save dirs for sr and I_t
         save_root = os.path.join(args.ckpt_dir, 'results')
         os.makedirs(save_root, exist_ok=True)
         if isinstance(name, (list, tuple)):
@@ -87,34 +104,21 @@ def main():
             name_str = str(name)
         name_str = os.path.splitext(os.path.basename(name_str))[0]
 
-        t_list_mid = [k / upscale for k in range(1, upscale)]
-        # inference 输入 [B,H,W,T]，输出 [B,T,H,W]
-        lr_mid = lr_mid.unsqueeze(0).cuda()
-        with torch.no_grad():
-            sr_mid = model.inference(lr_mid, t_list_mid)
-            if surplus == 0:
-                sr = sr_mid
-            elif surplus == 1:
-                # 直接拼最后一张，注意与 sr_mid 布局对齐为 [B,T,H,W]
-                sr_tail = lr_surplus.permute(2, 0, 1).unsqueeze(0).cuda()
-                sr = torch.cat([sr_mid, sr_tail], dim=1)
-            else:
-                t_list_surplus = [k / surplus for k in range(1, surplus)]
-                lr_surplus = lr_surplus.unsqueeze(0).cuda()
-                sr_surplus = model.inference(lr_surplus, t_list_surplus)
-                # 首帧与 sr_mid 末帧重叠，丢掉
-                sr = torch.cat([sr_mid, sr_surplus[:, 1:]], dim=1)
+        gap = args.test_gap
+        if gap < 2:
+            raise ValueError(f"test_gap must be >= 2, got {gap}")
+        lr_slice_patch = getattr(args, "lr_slice_patch", 4)
 
-        # [B,T,H,W] -> [H,W,S]，与 gt 对齐
-        sr = torch.clamp(sr.squeeze(0).permute(1, 2, 0), 0, 1)
+        gt = gt.cuda()
+        infer_model = model.module if hasattr(model, "module") else model
+        sr = infer_volume(infer_model, gt, gap=gap, lr_slice_patch=lr_slice_patch)
+        gt = gt[..., : sr.shape[2]]
         sr_cpu = sr.detach().cpu()
 
         sr_raw = util.denormalize(sr_cpu, vmin, vmax).numpy().astype(np.float32)
         save_path = os.path.join(save_root, f"{name_str}.npy")
         np.save(save_path, sr_raw)
 
-        gt = gt.cuda()
-        sr = sr.cuda()
         psnr = calc_psnr(gt, sr).item()
         for i in range(gt.shape[2]):
             ssim = calc_ssim(gt[:, :, i], sr[:, :, i])

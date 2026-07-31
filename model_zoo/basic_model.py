@@ -214,3 +214,43 @@ class TimeConditionModulation(nn.Module):
         style = self.mlp(t).unsqueeze(-1).unsqueeze(-1)  # (B, 2*C, 1, 1)
         scale, shift = torch.chunk(style, 2, dim=1)
         return x * (1 + scale) + shift
+
+class CrossViewBlock(nn.Module):
+    def __init__(self,n_feat, image_size):
+        super().__init__()
+        self.image_size = image_size
+
+        self.norm = nn.LayerNorm(n_feat)
+
+        self.conv_sag = nn.Sequential(
+            nn.Conv2d(n_feat,n_feat,1,1,0),
+            Rearrange('b c h w -> b h c w'),
+            nn.PixelShuffle(2),
+            nn.Conv2d(image_size // 4, n_feat, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(n_feat, image_size // 4, 3, 1, 1),
+            nn.PixelUnshuffle(2),
+            Rearrange('b h c w -> b c h w'),
+        )
+        
+        self.conv_cor = nn.Sequential(
+            nn.Conv2d(n_feat,n_feat,1,1,0),
+            Rearrange('b c h w -> b w c h'),
+            nn.PixelShuffle(2),
+            nn.Conv2d(image_size // 4, n_feat, 3, 1, 1),
+            nn.ReLU(),
+            nn.Conv2d(n_feat, image_size // 4, 3, 1, 1),
+            nn.PixelUnshuffle(2),
+            Rearrange('b w c h -> b c h w'),
+        )
+
+    def forward(self,x):
+        B,C,H,W = x.shape
+        x = einops.rearrange(x,'b c h w -> b (h w) c')
+        x = self.norm(x)
+        x = einops.rearrange(x,'b (h w) c -> b c h w',h=H,w=W)
+
+        x_sag_f = self.conv_sag(x) # b c h w
+        x_cor_f = self.conv_cor(x) # b c h w
+        x_out = x_cor_f + x_sag_f
+        return x_out

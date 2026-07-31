@@ -1,8 +1,11 @@
 ﻿import torch
 import torch.nn as nn
 
-from .basic_model import default_conv, I2Group, TimeConditionModulation
+from .basic_model import default_conv, I2Group, TimeConditionModulation, CrossViewBlock
 from .flow_module import FlowEstimator
+
+# from basic_model import default_conv, I2Group, TimeConditionModulation
+# from flow_module import FlowEstimator
 
 
 def make_model(args):
@@ -27,6 +30,8 @@ class Net(nn.Module):
         self.head = nn.Sequential(conv(4, n_feats, kernel_size), nn.ReLU(), conv(n_feats, n_feats, kernel_size))
         self.flow_estimator = FlowEstimator(args, n_feats, kernel_size)
         self.mod1 = TimeConditionModulation(n_feats, cond_dim=self.cond_dim)
+
+        self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
 
         modules_body = [
             I2Group(
@@ -69,10 +74,13 @@ class Net(nn.Module):
         feat = self.mod1(feat, cond)
         res = feat
 
-        align_list = [res]
+        align_list = []
+        res = self.alignment[0](res) + res
+        align_list.append(res)
         for id, layer in enumerate(self.body):
             res = layer(res, cond)
             if id in [3, 7]:
+                res = self.alignment[id // 4 + 1](res) + res
                 align_list.append(res)
 
         feat = self.fuse_align(torch.cat(align_list, 1))
@@ -100,10 +108,14 @@ class Net(nn.Module):
             "img1": x[:, 1:2],
         }
 
-    def inference(self, x, cond):
+    def inference(self, x, cond, gap=None):
         x = x.permute(0, 3, 1, 2).contiguous()
         B, T_in, H, W = x.shape
-        gap_norm = 1.0
+        # A regular interpolation list contains gap - 1 target positions.
+        # Allow an explicit gap for custom/non-dense query lists.
+        if gap is None:
+            gap = len(cond) + 1
+        gap = float(gap)
 
         out_volume = []
 
@@ -114,7 +126,7 @@ class Net(nn.Module):
 
             for t_val in cond:
                 t_tensor = torch.tensor(
-                    [t_val, gap_norm], device=x.device, dtype=x.dtype
+                    [t_val, gap], device=x.device, dtype=x.dtype
                 ).view(1, self.cond_dim).expand(B, -1)
                 out_t, *_ = self.forward_single_t(img0, img1, t_tensor)
                 out_volume.append(out_t)
@@ -136,22 +148,21 @@ if __name__ == "__main__":
     def mock_train_batch(
         batch_size,
         image_size,
-        max_mid_slices=5,
+        train_gaps=(2, 3, 4),
         targets_per_span=2,
         device="cuda",
     ):
         lr_list, gt_list, t_list = [], [], []
         targets_per_span = max(1, int(targets_per_span))
-        max_gap = max(1, int(max_mid_slices) + 1)
+        valid_gaps = [int(gap) for gap in train_gaps if int(gap) - 1 >= targets_per_span]
 
         for _ in range(batch_size):
-            n_mid = random.randint(1, max_mid_slices)
-            span_len = n_mid + 2
+            gap = random.choice(valid_gaps)
+            n_mid = gap - 1
+            span_len = gap + 1
 
             hr_span = torch.rand(image_size, image_size, span_len)
             lr_base = hr_span[:, :, [0, -1]]
-            gap = n_mid + 1
-            gap_norm = min(float(gap) / float(max_gap), 1.0)
 
             all_mid = list(range(1, n_mid + 1))
             if targets_per_span <= n_mid:
@@ -163,7 +174,7 @@ if __name__ == "__main__":
                 lr_list.append(lr_base)
                 gt_list.append(hr_span[:, :, mid_idx : mid_idx + 1])
                 t_list.append(
-                    torch.tensor([mid_idx / gap, gap_norm], dtype=torch.float32)
+                    torch.tensor([mid_idx / gap, float(gap)], dtype=torch.float32)
                 )
 
         lr = torch.stack(lr_list, 0).to(device)
@@ -185,7 +196,7 @@ if __name__ == "__main__":
     args.win_num_sqrt = 16
     args.image_size = 256
     args.batch_size = 1
-    args.max_mid_slices = 11
+    args.train_gaps = [2, 3, 4]
     args.targets_per_span = 2
 
     device = torch.device("cuda", 0)
@@ -195,7 +206,7 @@ if __name__ == "__main__":
     lr, gt, t = mock_train_batch(
         batch_size=args.batch_size,
         image_size=args.image_size,
-        max_mid_slices=args.max_mid_slices,
+        train_gaps=args.train_gaps,
         targets_per_span=args.targets_per_span,
         device=device,
     )
