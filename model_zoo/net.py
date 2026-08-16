@@ -29,7 +29,7 @@ class Net(nn.Module):
 
         self.head = nn.Sequential(conv(4, n_feats, kernel_size), nn.ReLU(), conv(n_feats, n_feats, kernel_size))
         self.flow_estimator = FlowEstimator(args, n_feats, kernel_size)
-        self.mod1 = TimeConditionModulation(n_feats, cond_dim=self.cond_dim)
+        # self.mod1 = TimeConditionModulation(n_feats, cond_dim=self.cond_dim)
 
         self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
 
@@ -71,7 +71,7 @@ class Net(nn.Module):
 
         x_in = torch.cat([img0, img1, warped0, warped1], dim=1)
         feat = self.head(x_in)
-        feat = self.mod1(feat, cond)
+        # feat = self.mod1(feat, cond)
         res = feat
 
         align_list = []

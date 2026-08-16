@@ -24,24 +24,11 @@ class trainSet(Dataset):
         self.augment_s = augment_s
         self.augment_t = augment_t
         self.random_crop = random_crop
+        self.hr_slice_patch = args.hr_slice_patch
 
-        self.volume_list = [
-            os.path.join(data_root, f)
-            for f in os.listdir(data_root)
-            if f.endswith(".npy")
-        ]
+        self.volume_list = [os.path.join(data_root, f) for f in os.listdir(data_root) if f.endswith(".npy")]
         random.shuffle(self.volume_list)
         self.file_len = len(self.volume_list)
-
-    def _load_volume(self, volumepath):
-        volume = np.load(volumepath)
-        if volume.ndim == 4:
-            volume = volume[:, :, :, 0]
-        if volume.ndim != 3:
-            raise ValueError(
-                f"expects 3D volume [H,W,Z], got shape {volume.shape} from {volumepath}"
-            )
-        return volume
 
     def _augment_xy(self, volume):
         if self.augment_s and random.random() >= 0.5:
@@ -54,10 +41,7 @@ class trainSet(Dataset):
         z_size = volume.shape[2]
         targets_per_span = max(1, int(getattr(self.args, "targets_per_span", 1)))
         train_gaps = [int(gap) for gap in getattr(self.args, "train_gaps", [2, 3, 4])]
-        valid_gaps = [
-            gap for gap in train_gaps
-            if gap >= 2 and gap < z_size and (gap - 1) >= targets_per_span
-        ]
+        valid_gaps = [gap for gap in train_gaps if gap >= 2 and gap < z_size and (gap - 1) >= targets_per_span]
         if not valid_gaps:
             raise ValueError(
                 f"volume z={z_size} has no valid train gap in {train_gaps} "
@@ -102,7 +86,7 @@ class trainSet(Dataset):
         )
 
     def __getitem__(self, index):
-        volume = self._load_volume(self.volume_list[index])
+        volume = np.load(self.volume_list[index])
         volume = util.normalize(volume).astype(np.float32)
 
         lr_list, gt_list, t_list, meta_list = [], [], [], []

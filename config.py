@@ -20,7 +20,7 @@ def add_argument_group(name):
 # Dataset
 data_arg = add_argument_group('Dataset')
 data_arg.add_argument('--data_type', type=str, default='direct')
-# data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
+data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
 data_arg.add_argument('--train_gaps', type=parse_int_list, default=[2, 3, 4],
                       help='comma-separated endpoint gaps sampled uniformly during training, e.g. 2,3,4')
 data_arg.add_argument('--test_gap', type=int, default=4,
