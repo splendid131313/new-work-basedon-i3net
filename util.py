@@ -41,29 +41,29 @@ def resize(volume: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     t = t.permute(2, 3, 0, 1).contiguous().squeeze(-1)
     return t.cpu().numpy()
 
-def normalize(x, return_stats: bool = False):
-    """
-    Min-max normalize to [0, 1].
-
-    If return_stats=True, also returns (vmin, vmax) for denormalization.
-    """
-    eps = 1e-8
-    if isinstance(x, np.ndarray):
-        vmax = x.max()
-        vmin = x.min()
-        y = (x - vmin) / (vmax - vmin + eps)
-        return (y, float(vmin), float(vmax)) if return_stats else y
-    else:  # torch.Tensor
-        vmax = x.max()
-        vmin = x.min()
-        y = (x - vmin) / (vmax - vmin + eps)
-        return (y, vmin, vmax) if return_stats else y
-
-# def normalize(slice):
-#     ma,mi=4095 , 0
-#     slice = (slice - mi)/(ma - mi)
+# def normalize(x, return_stats: bool = False):
+#     """
+#     Min-max normalize to [0, 1].
 #
-#     return slice
+#     If return_stats=True, also returns (vmin, vmax) for denormalization.
+#     """
+#     eps = 1e-8
+#     if isinstance(x, np.ndarray):
+#         vmax = x.max()
+#         vmin = x.min()
+#         y = (x - vmin) / (vmax - vmin + eps)
+#         return (y, float(vmin), float(vmax)) if return_stats else y
+#     else:  # torch.Tensor
+#         vmax = x.max()
+#         vmin = x.min()
+#         y = (x - vmin) / (vmax - vmin + eps)
+#         return (y, vmin, vmax) if return_stats else y
+
+def normalize(slice):
+    ma,mi=4095 , 0
+    slice = (slice - mi)/(ma - mi)
+
+    return slice
 
 
 def denormalize(x, vmin, vmax):
