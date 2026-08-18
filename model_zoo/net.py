@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 import torch.nn as nn
 from .i3net.basic_model import default_conv, I2Group, CrossViewBlock
 from .flowseek.core.flowseek import FlowSeek
@@ -73,6 +73,32 @@ class I3Net(nn.Module):
 
         return (rgb * 255.0).clamp(0.0, 255.0)
     
+    def _get_align_linear(self, i_start, i_end):
+        """线性插值对齐: 在相邻 LR slice 间按时间做强度线性混合。"""
+        B, T, H, W = i_start.shape
+
+        w0_seq = torch.zeros((B, self.args.hr_slice_patch, H, W), device=i_start.device, dtype=i_start.dtype)
+        w1_seq = torch.zeros((B, self.args.hr_slice_patch, H, W), device=i_start.device, dtype=i_start.dtype)
+        flow_list = []
+
+        for i in range(self.args.lr_slice_patch):
+            idx = i * self.args.upscale
+            w0_seq[:, idx, :, :] = i_start[:, i, :, :] if i < i_start.shape[1] else i_end[:, -1, :, :]
+            w1_seq[:, idx, :, :] = w0_seq[:, idx, :, :]
+
+        for i in range(T):
+            img0 = i_start[:, i, :, :]
+            img1 = i_end[:, i, :, :]
+
+            for j in range(1, self.args.upscale):
+                time = j / self.args.upscale
+                curr_idx = i * self.args.upscale + j
+                interp = (1.0 - time) * img0 + time * img1
+                w0_seq[:, curr_idx, :, :] = interp
+                w1_seq[:, curr_idx, :, :] = interp
+
+        return w0_seq, w1_seq, flow_list
+
     def _get_align(self, i_start, i_end):
         B, T, H, W = i_start.shape
 
@@ -118,7 +144,8 @@ class I3Net(nn.Module):
         i_end = x[:, 1:, :, :]
         
         # B, T, H, W = x.shape
-        warped0, warped1, flow_list = self._get_align(i_start, i_end)
+        warped0, warped1, flow_list = self._get_align_linear(i_start, i_end)
+        # warped0, warped1, flow_list = self._get_align(i_start, i_end)  # 光流插值
 
         align_input = torch.cat([x, warped0, warped1], 1)
         x_head = self.head(align_input)

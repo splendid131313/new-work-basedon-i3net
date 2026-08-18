@@ -59,6 +59,12 @@ def normalize(x, return_stats: bool = False):
         y = (x - vmin) / (vmax - vmin + eps)
         return (y, vmin, vmax) if return_stats else y
 
+# def normalize(slice):
+#     ma,mi=4095 , 0
+#     slice = (slice - mi)/(ma - mi)
+#
+#     return slice
+
 
 def denormalize(x, vmin, vmax):
     """Inverse of normalize(): x in [0,1] -> original scale."""
