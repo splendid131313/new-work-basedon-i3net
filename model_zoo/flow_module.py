@@ -22,6 +22,33 @@ def warp(x, flow):
     return F.grid_sample(x, grid, padding_mode="border", align_corners=True)
 
 
+def _zero_flow(img):
+    if img.ndim == 3:
+        img = img.unsqueeze(1)
+    B, _, H, W = img.shape
+    return torch.zeros(B, 2, H, W, device=img.device, dtype=img.dtype)
+
+
+class LinearEstimator(nn.Module):
+    """Intensity linear blend. Drop-in replacement for FlowEstimator.
+
+    forward(img0, img1, cond) -> warped0, warped1, flow0t, flow1t
+    """
+
+    def __init__(self, args=None, n_feats=None, kernel_size=None):
+        super().__init__()
+
+    def _get_base_flow(self, img0, img1):
+        zeros = _zero_flow(img0)
+        return zeros, zeros.clone()
+
+    def forward(self, img0, img1, cond):
+        t = cond[:, :1].to(dtype=img0.dtype).view(-1, 1, 1, 1)
+        interp = (1.0 - t) * img0 + t * img1
+        flow0t, flow1t = self._get_base_flow(img0, img1)
+        return interp, interp, flow0t, flow1t
+
+
 class FlowEstimator(nn.Module):
     def __init__(self, args,n_feats, kernel_size):
         super(FlowEstimator, self).__init__()

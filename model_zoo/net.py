@@ -2,8 +2,8 @@
 import torch.nn as nn
 
 from .basic_model import default_conv, I2Group, TimeConditionModulation, CrossViewBlock
+from .flow_module import LinearEstimator
 from .flow_module import FlowEstimator
-
 # from basic_model import default_conv, I2Group, TimeConditionModulation
 # from flow_module import FlowEstimator
 
@@ -28,7 +28,8 @@ class Net(nn.Module):
         window_size = args.image_size // args.win_num_sqrt
 
         self.head = nn.Sequential(conv(4, n_feats, kernel_size), nn.ReLU(), conv(n_feats, n_feats, kernel_size))
-        self.flow_estimator = FlowEstimator(args, n_feats, kernel_size)
+        self.flow_estimator = LinearEstimator(args, n_feats, kernel_size)
+        # self.flow_estimator = FlowEstimator(args, n_feats, kernel_size)
         self.mod1 = TimeConditionModulation(n_feats, cond_dim=self.cond_dim)
 
         self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])

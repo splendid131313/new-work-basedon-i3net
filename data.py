@@ -135,12 +135,13 @@ class testSet(Dataset):
     volumepath = self.trainlist[index]
     volumeIn = np.load(volumepath)
     volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
-    volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
+    # volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
+    volumeIn = util.normalize(volumeIn)
     volumeIn = volumeIn.astype(np.float32)
     volumeIn = torch.from_numpy(volumeIn)
 
     name = volumepath.split("/")[-1].split(".")[0]
-    return name, volumeIn, np.float32(vmin), np.float32(vmax)
+    return name, volumeIn#, np.float32(vmin), np.float32(vmax)
 
   def __len__(self):
     return self.file_len
