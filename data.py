@@ -31,17 +31,18 @@ class trainSet(Dataset):
 
     def __getitem__(self, index):
         volumepath = self.folder_list[index]
-        slice_list = [(volumepath+'/'+f) for f in os.listdir(volumepath) if f.endswith('.npy')]
+        # slice_list = [(volumepath+'/'+f) for f in os.listdir(volumepath) if f.endswith('.npy')]
+        slice_list = [(volumepath + '/' + f) for f in os.listdir(volumepath)]
         slice_list.sort()
         
         def getAVol(slice_list):
             id = random.randint(0,len(slice_list) - self.args.hr_slice_patch)
             volume = []
             for i in range(self.args.hr_slice_patch):
-                # with open(slice_list[id+i], 'rb') as _f: img = pickle.load(_f)
-                # volume.append(img['image'])
-                img = np.load(slice_list[id+i])
-                volume.append(img)
+                with open(slice_list[id+i], 'rb') as _f: img = pickle.load(_f)
+                volume.append(img['image'])
+                # img = np.load(slice_list[id+i])
+                # volume.append(img)
 
             volume = np.array(volume,dtype=np.float32).transpose(1,2,0) 
             volume = util.normalize(volume) # ->[0-1]
@@ -77,18 +78,19 @@ class testSet(Dataset):
          
     def __getitem__(self, index):
         volumepath = self.trainlist[index]
-        # with open(volumepath, 'rb') as _f: volumeIn = pickle.load(_f)
-        # volumeIn = volumeIn['image'] #[h,w,s] [0,4095]
-        volumeIn = np.load(volumepath)
+        with open(volumepath, 'rb') as _f: volumeIn = pickle.load(_f)
+        volumeIn = volumeIn['image'] #[h,w,s] [0,4095]
+        # volumeIn = np.load(volumepath)
         # volumeIn = util.crop_center(volumeIn,256,256)
         # volumeIn = util.resize(volumeIn, self.image_size, self.image_size)
         volumeIn = util.crop_center(volumeIn, self.image_size, self.image_size)
-        volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
+        # volumeIn, vmin, vmax = util.normalize(volumeIn, return_stats=True)
+        volumeIn = util.normalize(volumeIn)
         volumeIn = volumeIn.astype(np.float32)
         volumeIn=torch.from_numpy(volumeIn) # w,h,s
         
         name = volumepath.split('/')[-1].split('.')[0]
-        return name, volumeIn, np.float32(vmin), np.float32(vmax)  # [h,w,slice]
+        return name, volumeIn#, np.float32(vmin), np.float32(vmax)  # [h,w,slice]
 
     def __len__(self):
         return self.file_len

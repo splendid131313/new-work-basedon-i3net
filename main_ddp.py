@@ -24,7 +24,7 @@ from data import trainSet
 from util_evaluation import calc_psnr, calc_ssim
 from select_model import select_model
 import optim
-from select_loss import TotalLoss, edge_aware_smoothness
+from select_loss import TotalLoss
 
 
 def main():
@@ -89,12 +89,18 @@ def main():
     scheduler = optim.select_scheduler(args, optimizer)
     loss_function = TotalLoss(args, device=device).to(device)
 
-    if is_main:
-        wandb.init(
-            project="i3net_flowseek",
-            name=wandb_name,
-            config=args.__dict__,
-        )
+    use_wandb = bool(args.use_wandb) and is_main
+    if use_wandb:
+        try:
+            init_kwargs = dict(
+                project=args.wandb_project,
+                name=wandb_name,
+                config=args.__dict__,
+            )
+            wandb.init(**init_kwargs)
+        except Exception as e:
+            print(f"[warn] wandb.init failed ({e}); continue without wandb")
+            use_wandb = False
 
     # amp
     use_amp = args.amp
@@ -137,14 +143,14 @@ def main():
 
             if use_amp:
                 with autocast():
-                    sr, flow_list = model(lr)
+                    sr = model(lr)
                     loss_iter = loss_function(sr, gt)
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                sr, flow_list = model(lr)
+                sr = model(lr)
                 loss_iter = loss_function(sr, gt)
                 loss = loss_iter
                 loss.backward()
@@ -210,17 +216,18 @@ def main():
                 sr_mid = sr[0, :, :, mid_s].detach().cpu().float().numpy()
                 gt_mid = gt[0, :, :, mid_s].detach().cpu().float().numpy()
 
-                wandb.log(
-                    {
-                        "train/psnr_epoch": psnr_epoch,
-                        "train/psnr_pred_epoch": psnr_pred_epoch,
-                        "train/loss_epoch": loss_iter_epoch,
-                        "train/lr": lr_tmp,
-                        "epoch": epoch,
-                        "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
-                        "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
-                    }
-                )
+                if use_wandb:
+                    wandb.log(
+                        {
+                            "train/psnr_epoch": psnr_epoch,
+                            "train/psnr_pred_epoch": psnr_pred_epoch,
+                            "train/loss_epoch": loss_iter_epoch,
+                            "train/lr": lr_tmp,
+                            "epoch": epoch,
+                            "vis/sr_slice": wandb.Image(sr_mid, caption="SR pred"),
+                            "vis/gt_slice": wandb.Image(gt_mid, caption="GT"),
+                        }
+                    )
 
             log = (
                 f"epoch[{epoch + 1}/{args.max_epoch}] "
@@ -246,7 +253,7 @@ def main():
                            args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
                            )
 
-    if is_main:
+    if use_wandb:
         wandb.finish()
 
     dist.destroy_process_group()

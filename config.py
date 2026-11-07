@@ -29,9 +29,6 @@ model_arg.add_argument("--resume", type=bool, default=False, help='run resume or
 model_arg.add_argument('--ckpt', type=str, default='', help='pretrained model path')
 model_arg.add_argument("--flow_cfg", type=str, default="flowseek-S.json")
 model_arg.add_argument("--flow_ckpt", type=str, default="./model_zoo/flowseek/weights/flowseek_T_CT.pth")
-model_arg.add_argument("--flowseek_finetune_mode", type=str, default="full",
-    help=("FlowSeek 分段微调: frozen | merge_head | heads | adapter | lite | refine | full "),
-)
 
 # Training / test parameters
 learn_arg = add_argument_group('Learning')
@@ -67,6 +64,8 @@ misc_arg.add_argument('--num_workers', type=int, default=8)
 misc_arg.add_argument('--parallel', type=bool, default=True, help="parallel training")
 misc_arg.add_argument("--local_rank", default=os.getenv('LOCAL_RANK', 0), type=int)
 misc_arg.add_argument("--amp", default=True, type=bool, help='autocast')
+misc_arg.add_argument('--use_wandb', type=str2bool, default=False, help='enable wandb logging')
+misc_arg.add_argument('--wandb_project', type=str, default='i3net_flowseek')
 
 def get_args():
     """Parses all of the arguments above
