@@ -16,11 +16,9 @@ def add_argument_group(name):
 data_arg = add_argument_group('Dataset')
 data_arg.add_argument('--data_type', type=str, default='direct')
 data_arg.add_argument('--lr_slice_patch', type=int, default=4, help='每个lr样本的slice个数,插值为中间3个slice')
-data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task06_Lung/train')
-data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/test')
+data_arg.add_argument('--traindata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/data_slice/imagesTr')
+data_arg.add_argument('--testdata_path', type=str, default='/remote-home/share/Medical/i3net_dataset/Task10_Colon/data_volume/imagesTs')
 data_arg.add_argument('--image_size', type=int, default=256)
-
-
 # Model
 model_arg = add_argument_group('Model')
 model_arg.add_argument('--model', type=str, default='i3net', help='select model')
@@ -54,8 +52,6 @@ learn_arg.add_argument('--warmup_epoch', type=float, default=0.05, help='warm up
 learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
 learn_arg.add_argument('--lambda_lap', type=float, default=0.2)
 learn_arg.add_argument('--lambda_gra', type=float, default=0.05)
-learn_arg.add_argument('--lambda_flow', type=float, default=0.01)
-learn_arg.add_argument('--lambda_ssim', type=float, default=0.1)
 # Misc
 misc_arg = add_argument_group('Misc')
 misc_arg.add_argument('--ckpt_dir', type=str, default='full-total-loss',help='saved filename')
@@ -78,7 +74,5 @@ def get_args():
         print("Unparsed args: {}".format(unparsed))
     
     args.hr_slice_patch = args.upscale * (args.lr_slice_patch - 1) + 1
-    args.lr_time_list = torch.linspace(0, 1, args.upscale - 1 + 2)
-    # args.hr_time_list = torch.linspace(0, 1, args.hr_slice_patch)
     return args, unparsed
 

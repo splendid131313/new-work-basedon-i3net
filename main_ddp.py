@@ -101,7 +101,12 @@ def main():
         except Exception as e:
             print(f"[warn] wandb.init failed ({e}); continue without wandb")
             use_wandb = False
-
+    else:
+        with open(args.ckpt_dir + '/logs.txt', mode='a+') as f:
+            s = "START EXPERIMENT\n"
+            f.write(s)
+            for i, j in args.__dict__.items():
+                f.write(str(i) + ' : ' + str(j) + '\n')
     # amp
     use_amp = args.amp
     if use_amp:
@@ -235,6 +240,8 @@ def main():
             )
             now = str(datetime.datetime.now())
             print(now + " " + log)
+            with open(args.ckpt_dir + '/logs.txt', mode='a+') as f:
+                f.write('\n' + now + log)
 
             os.makedirs(args.ckpt_dir + "/pth", exist_ok=True)
 

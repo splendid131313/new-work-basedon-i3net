@@ -40,7 +40,7 @@ def select_model(args):
     args_add_additional_attr(args, opt_path)
     flow_path = f"model_zoo/flowseek/config/eval/{args.flow_cfg}"
     args_add_additional_attr(args, flow_path)
-    module = import_module("model_zoo.net")
+    module = import_module("model_zoo.net_confidence")
     model = module.make_model(args)
 
     flow_state = load_flowseek_ckpt(args)

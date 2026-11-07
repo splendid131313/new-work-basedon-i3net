@@ -90,7 +90,7 @@ class testSet(Dataset):
         volumeIn=torch.from_numpy(volumeIn) # w,h,s
         
         name = volumepath.split('/')[-1].split('.')[0]
-        return name, volumeIn#, np.float32(vmin), np.float32(vmax)  # [h,w,slice]
+        return name, volumeIn, np.float32(0), np.float32(4095)  # [h,w,slice]
 
     def __len__(self):
         return self.file_len
