@@ -30,11 +30,6 @@ def _zero_flow(img):
 
 
 class LinearEstimator(nn.Module):
-    """Intensity linear blend. Drop-in replacement for FlowEstimator.
-
-    forward(img0, img1, cond) -> warped0, warped1, flow0t, flow1t
-    """
-
     def __init__(self, args=None, n_feats=None, kernel_size=None):
         super().__init__()
 

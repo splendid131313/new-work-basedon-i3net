@@ -34,9 +34,10 @@ def select_model(args):
     module = import_module('model_zoo.net')
     model = module.make_model(args)
 
+    estimator = getattr(args, "estimator", "linear")
     flowseek = getattr(model.flow_estimator, "flowseek", None)
-    if flowseek is None:
-        print("using LinearEstimator, skip flowseek ckpt")
+    if estimator == "linear" or flowseek is None:
+        print(f"using estimator={estimator}, skip flowseek ckpt")
         return model
 
     flow_state = load_flowseek_ckpt(args)
@@ -47,7 +48,7 @@ def select_model(args):
         print(f"Warning: Missing keys: {missing_keys}")
     for param in flowseek.parameters():
         param.requires_grad = False
-    print("load flowseek weight success")
+    print(f"using estimator={estimator}, load flowseek weight success")
     return model
 
 

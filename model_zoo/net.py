@@ -2,10 +2,7 @@
 import torch.nn as nn
 
 from .basic_model import default_conv, I2Group, TimeConditionModulation, CrossViewBlock
-from .flow_module import LinearEstimator
-from .flow_module import FlowEstimator
-# from basic_model import default_conv, I2Group, TimeConditionModulation
-# from flow_module import FlowEstimator
+from .flow_module import LinearEstimator, FlowEstimator
 
 
 def make_model(args):
@@ -17,6 +14,7 @@ class Net(nn.Module):
         super(Net, self).__init__()
         self.args = args
         self.cond_dim = 2
+        self.estimator_type = getattr(args, "estimator", "linear")
         n_feats = args.n_feats  # 64
         kernel_size = args.kernel_size  # 3
         num_blocks = args.i_num_blocks  # 16
@@ -28,8 +26,13 @@ class Net(nn.Module):
         window_size = args.image_size // args.win_num_sqrt
 
         self.head = nn.Sequential(conv(4, n_feats, kernel_size), nn.ReLU(), conv(n_feats, n_feats, kernel_size))
-        self.flow_estimator = LinearEstimator(args, n_feats, kernel_size)
-        # self.flow_estimator = FlowEstimator(args, n_feats, kernel_size)
+        if self.estimator_type == "linear":
+            self.flow_estimator = LinearEstimator(args, n_feats, kernel_size)
+            tail_out_ch = 1  # residual only: out = I_lin + delta
+        else:
+            self.flow_estimator = FlowEstimator(args, n_feats, kernel_size)
+            tail_out_ch = 2  # mask + residual: out = m*w0 + (1-m)*w1 + delta
+
         self.mod1 = TimeConditionModulation(n_feats, cond_dim=self.cond_dim)
 
         self.alignment = nn.ModuleList([CrossViewBlock(n_feats, image_size=args.image_size) for _ in range(3)])
@@ -56,14 +59,20 @@ class Net(nn.Module):
         modules_tail = [
             conv(n_feats, n_feats, kernel_size),
             nn.ReLU(),
-            conv(n_feats, 2, kernel_size),
+            conv(n_feats, tail_out_ch, kernel_size),
         ]
         self.tail = nn.Sequential(*modules_tail)
         tail_last = self.tail[-1]
         with torch.no_grad():
-            nn.init.normal_(tail_last.weight[1:], mean=0.0, std=1e-4)
-            if tail_last.bias is not None:
-                nn.init.zeros_(tail_last.bias[:1])
+            if self.estimator_type == "flow":
+                # channel0=mask logit bias 0; channel1+=delta near zero
+                nn.init.normal_(tail_last.weight[1:], mean=0.0, std=1e-4)
+                if tail_last.bias is not None:
+                    nn.init.zeros_(tail_last.bias[:1])
+            else:
+                nn.init.normal_(tail_last.weight, mean=0.0, std=1e-4)
+                if tail_last.bias is not None:
+                    nn.init.zeros_(tail_last.bias)
 
     def forward_single_t(self, img0, img1, cond):
         # img0, img1: (B, 1, H, W)
@@ -86,10 +95,17 @@ class Net(nn.Module):
 
         feat = self.fuse_align(torch.cat(align_list, 1))
         raw_output = self.tail(feat)
-        mask = torch.sigmoid(raw_output[:, :1, :, :])
-        delta = raw_output[:, 1:, :, :]
 
-        out = mask * warped0 + (1 - mask) * warped1 + delta
+        if self.estimator_type == "linear":
+            # I_lin + residual; mask is intentionally absent
+            delta = raw_output
+            out = warped0 + delta
+            mask = None
+        else:
+            mask = torch.sigmoid(raw_output[:, :1, :, :])
+            delta = raw_output[:, 1:, :, :]
+            out = mask * warped0 + (1 - mask) * warped1 + delta
+
         return out, mask, warped0, warped1, flow0t, flow1t
 
     def forward(self, x, cond):
@@ -199,6 +215,7 @@ if __name__ == "__main__":
     args.batch_size = 1
     args.train_gaps = [2, 3, 4]
     args.targets_per_span = 2
+    args.estimator = "linear"
 
     device = torch.device("cuda", 0)
     model = Net(args).to(device)
@@ -218,4 +235,5 @@ if __name__ == "__main__":
     print(f"t:   {t.shape}")    # [B * targets_per_span, 2]
     print(t[:, :1])
     print(f"out: {out['out'].shape}")  # [B, H, W, 1]
-    print(f"mask: {out['mask'].shape}")
+    print(f"mask: {None if out['mask'] is None else out['mask'].shape}")
+    print(f"estimator: {args.estimator}")
