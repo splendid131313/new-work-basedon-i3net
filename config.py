@@ -48,6 +48,7 @@ learn_arg.add_argument('--flood', type=bool, default=False)
 learn_arg.add_argument('--lambda_l1', type=float, default=1.0)
 learn_arg.add_argument('--lambda_lap', type=float, default=0.2)
 learn_arg.add_argument('--lambda_gra', type=float, default=0.05)
+learn_arg.add_argument('--lambda_change', type=float, default=0.1)
 #### schedule ####
 learn_arg.add_argument('--schedule', type=str, default='cos_lr', help='step/cos_lr/Tmax/Tmin') 
 learn_arg.add_argument('--lr_decay', type=int, default=400)

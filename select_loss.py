@@ -45,22 +45,9 @@ class SSIM(nn.Module):
 
         return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)
 
-def compute_reprojection_loss(pred, target):
-    """Computes reprojection loss between a batch of predicted and target images
-    """
-    abs_diff = torch.abs(target - pred)
-    l1_loss = abs_diff.mean(1, True)
-
-    ssim = SSIM().to(pred.device, pred.dtype)
-    ssim_loss = ssim(pred, target).mean(1, True)
-    reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
-
-    return reprojection_loss.mean()
-
 
 import torch
 from torch import nn
-import torch.fft
 import torch.nn.functional as F
 from torch.cuda.amp import autocast
 
@@ -215,6 +202,26 @@ class GradientLoss(nn.Module):
         return loss_x + loss_y
 
 
+class CrossQueryChangeLoss(nn.Module):
+
+
+    def forward(self, pred, target, cond, span_ids):
+        cond = cond.detach().to(device=pred.device)
+        span_ids = span_ids.to(device=pred.device)
+        losses = []
+        for span_id in torch.unique(span_ids):
+            indices = torch.where(span_ids == span_id)[0]
+            if indices.numel() < 2:
+                continue
+            indices = indices[torch.argsort(cond[indices, 0])]
+            pred_group, target_group = pred[indices], target[indices]
+            losses.append(F.l1_loss(
+                pred_group[1:] - pred_group[:-1],
+                target_group[1:] - target_group[:-1],
+            ))
+        return torch.stack(losses).mean() if losses else pred.sum() * 0.0
+
+
 class TotalLoss(nn.Module):
     def __init__(self, args, device=None):
         super().__init__()
@@ -222,13 +229,15 @@ class TotalLoss(nn.Module):
         self.lambda_l1 = args.lambda_l1
         self.lambda_lap = args.lambda_lap
         self.lambda_gra = args.lambda_gra
+        self.lambda_change = args.lambda_change
         
         self.l1 = nn.L1Loss()
         self.lap_loss = LapLoss(channels=1, device=device)  # single-t output
         self.grad_loss = GradientLoss()
+        self.change_loss = CrossQueryChangeLoss()
         
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, cond=None, span_ids=None):
         with autocast(enabled=False):
             pred = pred.float().permute(0, 3, 1, 2).contiguous()
             target = target.float().permute(0, 3, 1, 2).contiguous()
@@ -236,4 +245,6 @@ class TotalLoss(nn.Module):
             l1 = self.l1(pred, target) * self.lambda_l1
             freq = self.lap_loss(pred, target) * self.lambda_lap
             grad = self.grad_loss(pred, target) * self.lambda_gra
-            return l1 + freq + grad
+            loss = l1 + freq + grad
+            loss = loss + self.lambda_change * self.change_loss(pred, target, cond, span_ids)
+            return loss

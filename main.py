@@ -97,6 +97,7 @@ def main():
             lr = lr.to(device, non_blocking=True)
             gt = gt.to(device, non_blocking=True)
             t = t.to(device, non_blocking=True)
+            span_ids = span_ids.to(device, non_blocking=True)
 
             optimizer.zero_grad()
 
@@ -104,7 +105,7 @@ def main():
                 with autocast():
                     model_out = model(lr, t)
                     out = model_out["out"] if isinstance(model_out, dict) else model_out
-                    loss_iter = loss_function(out, gt)
+                    loss_iter = loss_function(out, gt, cond=t, span_ids=span_ids)
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -112,7 +113,7 @@ def main():
             else:
                 model_out = model(lr, t)
                 out = model_out["out"] if isinstance(model_out, dict) else model_out
-                loss_iter = loss_function(out, gt)
+                loss_iter = loss_function(out, gt, cond=t, span_ids=span_ids)
                 loss = loss_iter
                 loss.backward()
                 optimizer.step()
@@ -171,10 +172,11 @@ def main():
             print(f"Saved best checkpoint at epoch {epoch + 1}, psnr={best_psnr:.6f}")
 
         if epoch + 1 > last_99_start:
-            state_dict = model.module.state_dict()
-            torch.save(state_dict,
-                       args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
-                       )
+            state_dict = model.state_dict()
+            torch.save(
+                state_dict,
+                args.ckpt_dir + "/pth/" + str(epoch + 1).zfill(4) + ".pth",
+            )
 
 
 if __name__ == "__main__":
