@@ -55,8 +55,12 @@ class trainSet(Dataset):
 
     def _sample_dynamic_span(self, volume):
         z_size = volume.shape[2]
-        train_gaps = [int(gap) for gap in getattr(self.args, "train_gaps", [4])]
-        valid_gaps = [gap for gap in train_gaps if gap >= 2 and gap < z_size]
+        targets_per_span = max(1, int(getattr(self.args, "targets_per_span", 1)))
+        train_gaps = [int(gap) for gap in getattr(self.args, "train_gaps", [2, 3, 4])]
+        valid_gaps = [
+            gap for gap in train_gaps
+            if gap >= 2 and gap < z_size and (gap - 1) >= targets_per_span
+        ]
 
         gap = random.choice(valid_gaps)
         n_mid = gap - 1
@@ -68,12 +72,16 @@ class trainSet(Dataset):
         hr_span = self._augment_xy(hr_span)
         hr_span = util.crop_center(hr_span, self.image_size, self.image_size)
 
-        mid_indices = torch.arange(1, gap, dtype=torch.float32)
+        mid_indices = random.sample(list(range(1, n_mid + 1)), targets_per_span)
+        mid_indices = sorted(mid_indices)
         endpoints = torch.from_numpy(hr_span[:, :, [0, -1]].copy())
-        lr = endpoints.unsqueeze(0).repeat(n_mid, 1, 1, 1)
-        gt = torch.from_numpy(hr_span[:, :, 1:-1].copy())
-        gt = gt.permute(2, 0, 1).unsqueeze(-1).contiguous()
-        cond = torch.stack((mid_indices / gap, torch.full_like(mid_indices, gap)), dim=1)
+        lr = endpoints.unsqueeze(0).repeat(targets_per_span, 1, 1, 1)
+        gt = torch.stack(
+            [torch.from_numpy(hr_span[:, :, mid_idx : mid_idx + 1].copy()) for mid_idx in mid_indices],
+            dim=0,
+        )
+        mid_t = torch.tensor(mid_indices, dtype=torch.float32)
+        cond = torch.stack((mid_t / gap, torch.full_like(mid_t, float(gap))), dim=1)
         return lr, gt, cond
 
     def __getitem__(self, index):

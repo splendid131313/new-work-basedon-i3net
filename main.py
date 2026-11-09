@@ -101,11 +101,14 @@ def main():
 
             optimizer.zero_grad()
 
+            flow_fn = model.flow_estimator._get_base_flow
             if use_amp:
                 with autocast():
                     model_out = model(lr, t)
                     out = model_out["out"] if isinstance(model_out, dict) else model_out
-                    loss_iter = loss_function(out, gt, cond=t, span_ids=span_ids)
+                    loss_iter = loss_function(
+                        model_out, gt, cond=t, lr=lr, flow_fn=flow_fn
+                    )
                     loss = loss_iter
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -113,7 +116,9 @@ def main():
             else:
                 model_out = model(lr, t)
                 out = model_out["out"] if isinstance(model_out, dict) else model_out
-                loss_iter = loss_function(out, gt, cond=t, span_ids=span_ids)
+                loss_iter = loss_function(
+                    model_out, gt, cond=t, lr=lr, flow_fn=flow_fn
+                )
                 loss = loss_iter
                 loss.backward()
                 optimizer.step()

@@ -31,7 +31,7 @@ class FlowSeek(
         self.args.corr_levels = 4
         self.args.corr_radius = args.radius
         self.args.corr_channel = args.corr_levels * (args.radius * 2 + 1) ** 2
-        self.cnet = ResNetFPN(args, input_dim=6, output_dim=2 * self.args.dim, norm_layer=nn.BatchNorm2d, init_weight=True)
+        self.cnet = ResNetFPN(args, input_dim=6, output_dim=2 * self.args.dim, norm_layer=nn.BatchNorm2d, init_weight=False)
 
         self.da_model_configs = {
             'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -52,7 +52,7 @@ class FlowSeek(
             nn.Conv2d(self.da_model_configs[args.da_size]['features']*2, self.da_model_configs[args.da_size]['features']*2, 3, stride=2, padding=1),
         )
 
-        self.bnet = ResNetFPN(args, input_dim=16, output_dim=2 * self.args.dim, norm_layer=nn.BatchNorm2d, init_weight=True)
+        self.bnet = ResNetFPN(args, input_dim=16, output_dim=2 * self.args.dim, norm_layer=nn.BatchNorm2d, init_weight=False)
 
         # conv for iter 0 results
         self.init_conv = conv3x3(2 * args.dim, 2 * args.dim)
@@ -70,7 +70,7 @@ class FlowSeek(
             nn.Conv2d(2 * args.dim, 6, 3, padding=1)
         )
         if args.iters > 0:
-            self.fnet = ResNetFPN(args, input_dim=3, output_dim=self.output_dim, norm_layer=nn.BatchNorm2d, init_weight=True)
+            self.fnet = ResNetFPN(args, input_dim=3, output_dim=self.output_dim, norm_layer=nn.BatchNorm2d, init_weight=False)
             self.update_block = BasicUpdateBlock(args, hdim=args.dim*2, cdim=args.dim*2)
 
 
